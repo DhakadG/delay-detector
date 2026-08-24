@@ -2,3 +2,8 @@ node_modules/
 .DS_Store
 *.log
 .wrangler/
+
+# native build output
+native/**/bin/
+native/**/obj/
+native/dist/

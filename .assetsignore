@@ -14,3 +14,4 @@ wrangler.jsonc
 .wrangler
 eslint.config.mjs
 scripts
+native
