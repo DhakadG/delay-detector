@@ -362,6 +362,9 @@
     <div class="row">
       <button class="ghost-btn" id="btn-bridge-connect">Connect</button>
       <button class="ghost-btn small" id="btn-vm-refresh" hidden>Refresh Voicemeeter</button>
+      <label class="pick" style="max-width:13rem" id="vm-watch-wrap" hidden>
+        <input type="checkbox" id="vm-watch" checked><span>Follow Voicemeeter</span>
+      </label>
     </div>
     <p class="note" id="vm-empty" hidden></p>
     <div id="vm-wrap" hidden>
@@ -381,6 +384,36 @@
       </div>
       <p class="hint">Turning on two buses for the same strip plays to both devices at once —
       which is when their delay difference becomes audible, and the case worth measuring.</p>
+
+      <p class="subhead">Align the outputs</p>
+      <p class="hint">Measures each selected bus on its own, then works out the per-bus delay that
+      makes them all emit at the same instant. Voicemeeter can only <em>add</em> delay, so everything
+      is pulled back to whichever output is already slowest — usually the Bluetooth one.</p>
+      <div class="picker" id="sync-buses"></div>
+      <div class="row">
+        <div class="field">
+          <label for="sync-source">Source strip</label>
+          <select id="sync-source"></select>
+        </div>
+        <button class="btn primary" id="btn-sync-solve">Measure &amp; align</button>
+        <button class="ghost-btn small" id="btn-sync-apply" hidden>Apply delays</button>
+        <button class="ghost-btn small" id="btn-sync-combos">Run every combination</button>
+        <button class="ghost-btn" id="btn-sync-stop" hidden>Stop</button>
+      </div>
+      <div class="progress" id="sync-progress" hidden><div></div></div>
+      <p class="status" id="sync-status"></p>
+      <div class="table-wrap" id="sync-wrap" hidden>
+        <table>
+          <thead><tr><th>Bus</th><th>Device</th><th>Measured</th><th>Set delay</th><th>Result</th></tr></thead>
+          <tbody id="sync-body"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap" id="combo-wrap" hidden>
+        <table>
+          <thead><tr><th>Combination</th><th>Earliest arrival</th><th>Jitter</th><th>Drift</th><th>Notes</th></tr></thead>
+          <tbody id="combo-body"></tbody>
+        </table>
+      </div>
     </div>
   </section>
 

@@ -12,6 +12,7 @@ import {BUILD, BUILT_AT} from './version.js';
 import {buildBatchPlan, estimateBatchSeconds, summariseBatch} from './batch.js';
 import {confirmDialog, promptNumber} from './dialog.js';
 import {createBridge, describeBridgeError, DEFAULT_BRIDGE_URL} from './bridge.js';
+import {solveBusDelays, busCombinations, routeFlagsFor} from './vmsync.js';
 
 const $ = (id) => document.getElementById(id);
 const isVirtual = (label) => /voicemeeter|vb-audio|virtual cable/i.test(label || '');
@@ -30,6 +31,8 @@ const state = {
   outputs: [],
   bridge: createBridge({baseUrl: DEFAULT_BRIDGE_URL}),
   bridgeDevices: null, vmState: null,
+  vmWatchTimer: null, vmStateHash: null,
+  syncPlan: null, syncAbort: false, syncRunning: false,
   batchAbort: false, batchRunning: false,
 };
 
@@ -448,6 +451,10 @@ function renderVoicemeeter(st) {
   wrap.hidden = false;
 
   const busCount = st.buses?.length || 0;
+  // Only some buses are A-buses. Banana reports five (A1-A3, B1, B2) but a strip's
+  // A vector has three entries, and asking the API to set Strip[i].A4 fails the
+  // ENTIRE call — which is why every routing button silently did nothing.
+  const aBusCount = st.strips?.[0]?.a?.length ?? Math.min(busCount, 3);
   const renderNames = (state.bridgeDevices?.render || []).map((d) => d.name);
 
   // --- buses: device assignment + output delay ---
@@ -529,6 +536,15 @@ function renderVoicemeeter(st) {
     busBody.appendChild(tr);
   }
 
+  // A bus is audible only if some strip is actually sending to it; the bus table
+  // alone cannot show that, which left no way to tell what was playing.
+  const liveBuses = new Set();
+  for (const strip of st.strips || []) {
+    (strip.a || []).forEach((on, i) => { if (on) liveBuses.add(i); });
+  }
+  state.liveBuses = liveBuses;
+  renderSyncPickers();
+
   // --- strips: which buses each source feeds ---
   const stripBody = $('vm-strips');
   stripBody.innerHTML = '';
@@ -540,7 +556,7 @@ function renderVoicemeeter(st) {
 
     const routeTd = document.createElement('td');
     routeTd.className = 'vm-routes';
-    for (let i = 0; i < busCount; i++) {
+    for (let i = 0; i < aBusCount; i++) {
       const on = !!strip.a?.[i];
       const b = document.createElement('button');
       b.type = 'button';
@@ -549,7 +565,7 @@ function renderVoicemeeter(st) {
       b.title = `${on ? 'Stop sending' : 'Send'} strip ${strip.index + 1} to A${i + 1}`;
       b.onclick = async () => {
         // Send the whole A vector, since the endpoint sets them together.
-        const flags = Array.from({length: busCount}, (_, k) => !!strip.a?.[k]);
+        const flags = Array.from({length: aBusCount}, (_, k) => !!strip.a?.[k]);
         flags[i] = !on;
         try {
           await state.bridge.setRoute(strip.index, flags);
@@ -590,6 +606,11 @@ async function connectBridge() {
     setBridgeStatus(`connected · v${info.version} · ${vmText}`, 'ok');
     log('ok', 'Local app connected', {version: info.version, voicemeeter: vm});
     $('btn-vm-refresh').hidden = false;
+    $('vm-watch-wrap').hidden = false;
+    // Remember that a bridge was reachable here, so the next visit can connect
+    // silently instead of making the user press Connect every time.
+    try { localStorage.setItem('delay-detector:bridge', '1'); } catch { /* private mode */ }
+    if ($('vm-watch').checked) startVoicemeeterWatch();
     state.bridgeDevices = await state.bridge.devices();
     log('info', 'Local app device list', {
       render: state.bridgeDevices.render.map((d) => d.name),
@@ -597,8 +618,27 @@ async function connectBridge() {
     });
     await refreshVoicemeeter();
   } catch (e) {
+    stopVoicemeeterWatch();
     setBridgeStatus(describeBridgeError(e), 'warn');
     log('warn', 'Local app not connected', {code: e.code, error: e.message});
+    throw e;
+  }
+}
+
+/**
+ * Connects without the user asking, but only quietly: a failure here is normal
+ * (the companion app is optional and usually not running) so it must not shout.
+ * Only auto-tries when a previous session actually reached a bridge, so first-time
+ * visitors are not billed a failed request on every load.
+ */
+async function autoConnectBridge() {
+  let seen = false;
+  try { seen = localStorage.getItem('delay-detector:bridge') === '1'; } catch { /* ignore */ }
+  if (!seen) { setBridgeStatus('not connected'); return; }
+  try {
+    await connectBridge();
+  } catch {
+    setBridgeStatus('local app not running', 'warn');
   }
 }
 
@@ -796,6 +836,340 @@ function updateRefBadge() {
   el.textContent = `Active reference: ${state.refDevice} · ${state.refMs.toFixed(1)} ms`;
 }
 
+// ------------------------------------------------------- voicemeeter sync ---
+
+/**
+ * Cheap change-detector for the Voicemeeter state. Polling is the only option:
+ * the Remote API exposes IsParametersDirty for its own clients but the bridge is
+ * request/response, so the page cannot be pushed to. Hashing what we render means
+ * the tables are only rebuilt when something actually differs, so a poll does not
+ * fight the user's cursor or reset a half-typed field.
+ */
+function vmHash(st) {
+  if (!st) return '';
+  return JSON.stringify({
+    b: (st.buses || []).map((b) => [b.label, b.device, b.delayMs]),
+    s: (st.strips || []).map((x) => [x.label, x.a, x.b]),
+    t: st.type, r: st.running,
+  });
+}
+
+function startVoicemeeterWatch() {
+  stopVoicemeeterWatch();
+  state.vmWatchTimer = setInterval(async () => {
+    if (!state.bridge.isConnected() || state.syncRunning || state.batchRunning) return;
+    if (document.hidden) return;   // a hidden tab is throttled; polling it is pointless
+    try {
+      const st = await state.bridge.voicemeeterState();
+      const h = vmHash(st);
+      if (h !== state.vmStateHash) {
+        state.vmStateHash = h;
+        renderVoicemeeter(st);
+        log('info', 'Voicemeeter changed externally — UI updated');
+      }
+    } catch {
+      // The app going away is normal; connectBridge() reports it properly.
+    }
+  }, 2000);
+}
+
+function stopVoicemeeterWatch() {
+  if (state.vmWatchTimer) clearInterval(state.vmWatchTimer);
+  state.vmWatchTimer = null;
+}
+
+/** Buses that have a device assigned — the only ones worth measuring. */
+function syncableBuses() {
+  return (state.vmState?.buses || [])
+    .filter((b) => b.device && b.index < (state.vmState?.strips?.[0]?.a?.length ?? 3));
+}
+
+function renderSyncPickers() {
+  const box = $('sync-buses');
+  if (!box) return;
+  const buses = syncableBuses();
+  const previously = new Set([...box.querySelectorAll('input:checked')].map((el) => +el.value));
+  box.innerHTML = '';
+  for (const b of buses) {
+    const wrap = document.createElement('label');
+    wrap.className = 'pick';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = String(b.index);
+    cb.checked = previously.size ? previously.has(b.index) : true;
+    const span = document.createElement('span');
+    span.textContent = `${b.label} · ${b.device}`;
+    wrap.append(cb, span);
+    box.appendChild(wrap);
+  }
+
+  const src = $('sync-source');
+  if (src) {
+    const prev = src.value;
+    src.innerHTML = '';
+    for (const strip of state.vmState?.strips || []) {
+      const opt = document.createElement('option');
+      opt.value = String(strip.index);
+      opt.textContent = strip.label || `Strip ${strip.index + 1}`;
+      // Default to whichever strip is already routed somewhere: that is the one
+      // the user's audio is actually coming out of.
+      if (prev ? prev === opt.value : (strip.a || []).some(Boolean)) opt.selected = true;
+      src.appendChild(opt);
+    }
+    enhanceSelect(src);
+  }
+}
+
+const selectedSyncBuses = () =>
+  [...$('sync-buses').querySelectorAll('input:checked')].map((el) => +el.value);
+
+/**
+ * Routes the chosen strip to exactly `combo` and measures what the mic hears.
+ * Everything else is muted for the duration, which is what makes a single-bus
+ * latency measurable at all when several outputs normally play together.
+ */
+async function measureBusCombo(stripIndex, combo, aBusCount, tag) {
+  await state.bridge.setRoute(stripIndex, routeFlagsFor(combo, aBusCount));
+  // Voicemeeter applies routing on its own audio thread; give it a moment before
+  // the sweep starts, or the first repeat lands during the switch.
+  await new Promise((r) => setTimeout(r, 400));
+  return performMeasurement({deviceId: state.vmSinkDeviceId || null, label: tag, tag: 'sync'});
+}
+
+/** The browser sink that feeds Voicemeeter, so the sweep enters the right strip. */
+function findVoicemeeterSink() {
+  const m = state.outputs.find((d) => /voicemeeter input/i.test(d.label || ''));
+  return m ? m.deviceId : null;
+}
+
+async function runSyncSolve() {
+  const buses = selectedSyncBuses();
+  const aBusCount = state.vmState?.strips?.[0]?.a?.length ?? 3;
+  const stripIndex = +$('sync-source').value;
+
+  if (buses.length < 2) {
+    setStatus('sync-status', 'Pick at least two buses — aligning one output to itself is a no-op.', 'warn');
+    return;
+  }
+  if (state.refMs == null) {
+    setStatus('sync-status', 'Measure the reference first (step 2) so the mic path can be cancelled.', 'bad');
+    return;
+  }
+
+  state.vmSinkDeviceId = findVoicemeeterSink();
+  if (!state.vmSinkDeviceId) {
+    setStatus('sync-status',
+      'No "Voicemeeter Input" output found in the browser, so the sweep cannot be sent into Voicemeeter.', 'bad');
+    return;
+  }
+
+  const before = (state.vmState?.strips || []).find((x) => x.index === stripIndex);
+  const restore = Array.from({length: aBusCount}, (_, i) => !!before?.a?.[i]);
+
+  state.syncRunning = true;
+  state.syncAbort = false;
+  $('btn-sync-solve').disabled = true;
+  $('btn-sync-combos').disabled = true;
+  $('btn-sync-stop').hidden = false;
+  $('sync-progress').hidden = false;
+  log('info', '=== SYNC SOLVE BEGIN ===', {buses, stripIndex, aBusCount});
+
+  const measured = [];
+  try {
+    for (let i = 0; i < buses.length; i++) {
+      if (state.syncAbort) break;
+      const bus = state.vmState.buses.find((b) => b.index === buses[i]);
+      $('sync-progress').firstElementChild.style.width = `${(i / buses.length) * 100}%`;
+      setStatus('sync-status', `Measuring ${bus.label} alone (${i + 1}/${buses.length})…`);
+
+      const {result: r, error} = await measureBusCombo(stripIndex, [buses[i]], aBusCount, bus.label);
+      if (!r) {
+        log('bad', 'Bus measurement failed', {bus: bus.label, error});
+        setStatus('sync-status', `${bus.label} failed: ${error}`, 'bad');
+        continue;
+      }
+      // Subtract the reference so the microphone and capture chain cancel; what
+      // is left is the bus's own output latency, which is what we align on.
+      measured.push({
+        busIndex: bus.index, label: bus.label, device: bus.device,
+        latencyMs: r.delayMs - state.refMs, jitterMs: r.jitterMs, driftMsPerSec: r.driftMsPerSec,
+      });
+      log('ok', 'Bus measured', {
+        bus: bus.label, roundTripMs: +r.delayMs.toFixed(2),
+        latencyVsReferenceMs: +(r.delayMs - state.refMs).toFixed(2),
+      });
+    }
+
+    if (measured.length < 2) {
+      setStatus('sync-status', 'Not enough buses measured successfully to align them.', 'bad');
+      return;
+    }
+
+    const solved = solveBusDelays(measured);
+    state.syncPlan = solved;
+    renderSyncPlan(solved, measured);
+    for (const w of solved.warnings) log('warn', w);
+    log('ok', '=== SYNC SOLVE COMPLETE ===', {
+      anchor: solved.anchorIndex, spreadMs: +solved.spreadMs.toFixed(1),
+      residualMs: +solved.residualMs.toFixed(2),
+      plan: solved.plan.map((p) => ({bus: p.label, delayMs: p.delayMs})),
+    });
+    setStatus('sync-status',
+      `Outputs differ by ${solved.spreadMs.toFixed(0)} ms. Apply the delays below to bring them together.`,
+      solved.warnings.length ? 'warn' : 'ok');
+    $('btn-sync-apply').hidden = false;
+  } catch (e) {
+    log('bad', 'Sync solve failed', {error: e.message});
+    setStatus('sync-status', 'Failed: ' + e.message, 'bad');
+  } finally {
+    // Put the routing back the way it was — a half-finished run must not leave
+    // the user's audio going somewhere they did not choose.
+    try { await state.bridge.setRoute(stripIndex, restore); } catch { /* reported below */ }
+    await refreshVoicemeeter();
+    state.syncRunning = false;
+    $('btn-sync-solve').disabled = false;
+    $('btn-sync-combos').disabled = false;
+    $('btn-sync-stop').hidden = true;
+    $('sync-progress').firstElementChild.style.width = '100%';
+  }
+}
+
+function renderSyncPlan(solved, measured) {
+  const body = $('sync-body');
+  body.innerHTML = '';
+  for (const p of solved.plan) {
+    const m = measured.find((x) => x.busIndex === p.busIndex);
+    const tr = document.createElement('tr');
+    if (p.clamped) tr.className = 'warn';
+    const isAnchor = p.busIndex === solved.anchorIndex;
+    tr.innerHTML =
+      `<td>${escapeHtml(p.label || 'bus ' + p.busIndex)}${isAnchor ? ' <span class="badge">slowest</span>' : ''}</td>` +
+      `<td>${escapeHtml(m?.device || '')}</td>` +
+      `<td class="mono">${p.latencyMs.toFixed(1)} ms</td>` +
+      `<td class="mono">${p.delayMs} ms</td>` +
+      `<td class="mono">${(p.latencyMs + p.delayMs).toFixed(1)} ms</td>`;
+    body.appendChild(tr);
+  }
+  $('sync-wrap').hidden = false;
+}
+
+async function applySyncPlan() {
+  if (!state.syncPlan) return;
+  $('btn-sync-apply').disabled = true;
+  let failed = 0;
+  for (const p of state.syncPlan.plan) {
+    try {
+      await state.bridge.setDelay(p.busIndex, p.delayMs);
+      log('ok', 'Bus delay set', {bus: p.label, delayMs: p.delayMs});
+    } catch (e) {
+      failed++;
+      log('bad', 'Could not set bus delay', {bus: p.label, code: e.code, error: e.message});
+    }
+  }
+  await refreshVoicemeeter();
+  $('btn-sync-apply').disabled = false;
+
+  const offset = state.syncPlan.anchorLatencyMs;
+  setStatus('sync-status',
+    failed
+      ? `${failed} delay(s) could not be set — see the log.`
+      : `Applied. All outputs now emit together, about ${offset.toFixed(0)} ms behind the source — ` +
+        `set your player's audio offset to ${-Math.round(offset)} ms.`,
+    failed ? 'bad' : 'ok');
+  if (!failed) toast(`Aligned. Player offset: ${-Math.round(offset)} ms`);
+}
+
+/**
+ * Measures every combination of the selected buses. Singles give each bus's own
+ * latency; the multi-bus runs are the check that the applied delays worked — an
+ * aligned pair collapses to one arrival, a misaligned one does not.
+ */
+async function runCombinations() {
+  const buses = selectedSyncBuses();
+  const aBusCount = state.vmState?.strips?.[0]?.a?.length ?? 3;
+  const stripIndex = +$('sync-source').value;
+  if (!buses.length) { setStatus('sync-status', 'Pick at least one bus.', 'warn'); return; }
+  if (state.refMs == null) {
+    setStatus('sync-status', 'Measure the reference first (step 2).', 'bad');
+    return;
+  }
+  state.vmSinkDeviceId = findVoicemeeterSink();
+  if (!state.vmSinkDeviceId) {
+    setStatus('sync-status', 'No "Voicemeeter Input" browser output found.', 'bad');
+    return;
+  }
+
+  const combos = busCombinations(buses);
+  const before = (state.vmState?.strips || []).find((x) => x.index === stripIndex);
+  const restore = Array.from({length: aBusCount}, (_, i) => !!before?.a?.[i]);
+  const nameOf = (i) => state.vmState.buses.find((b) => b.index === i)?.label || `A${i + 1}`;
+
+  const go = await confirmDialog({
+    title: 'Run every combination?',
+    body: `${combos.length} measurements, roughly ${Math.round(combos.length * 7 / 60)} min. ` +
+          `Your Voicemeeter routing will be changed during the run and restored afterwards.`,
+    confirmText: 'Run',
+  });
+  if (!go) return;
+
+  state.syncRunning = true;
+  state.syncAbort = false;
+  $('btn-sync-combos').disabled = true;
+  $('btn-sync-solve').disabled = true;
+  $('btn-sync-stop').hidden = false;
+  $('sync-progress').hidden = false;
+  $('combo-body').innerHTML = '';
+  $('combo-wrap').hidden = false;
+  log('info', '=== COMBINATION RUN BEGIN ===', {combos: combos.map((c) => c.map(nameOf).join('+'))});
+
+  try {
+    for (let i = 0; i < combos.length; i++) {
+      if (state.syncAbort) { log('warn', 'Combination run stopped by user'); break; }
+      const combo = combos[i];
+      const name = combo.map(nameOf).join(' + ');
+      $('sync-progress').firstElementChild.style.width = `${(i / combos.length) * 100}%`;
+      setStatus('sync-status', `${i + 1}/${combos.length} · ${name}`);
+
+      const {result: r, error} = await measureBusCombo(stripIndex, combo, aBusCount, name);
+      const tr = document.createElement('tr');
+      if (!r) {
+        tr.className = 'bad';
+        tr.innerHTML = `<td>${escapeHtml(name)}</td><td colspan="4">${escapeHtml(error || 'failed')}</td>`;
+      } else {
+        const latency = r.delayMs - state.refMs;
+        // With several buses live the correlator reports the FIRST arrival, so
+        // this is the leading device. Aligned groups show the same figure as
+        // their slowest member; a lead means they are still staggered.
+        if (r.drifting) tr.className = 'warn';
+        tr.innerHTML =
+          `<td>${escapeHtml(name)}${combo.length > 1 ? ' <span class="badge">group</span>' : ''}</td>` +
+          `<td class="mono">${latency.toFixed(1)} ms</td>` +
+          `<td class="mono">±${r.jitterMs.toFixed(2)} ms</td>` +
+          `<td class="mono">${r.driftMsPerSec.toFixed(2)} ms/s</td>` +
+          `<td>${combo.length > 1 ? 'earliest of the group' : ''}</td>`;
+        log('ok', 'Combination measured', {
+          combo: name, latencyMs: +latency.toFixed(2),
+          jitterMs: +r.jitterMs.toFixed(2), driftMsPerSec: +r.driftMsPerSec.toFixed(2),
+        });
+      }
+      $('combo-body').appendChild(tr);
+    }
+  } catch (e) {
+    log('bad', 'Combination run failed', {error: e.message});
+    setStatus('sync-status', 'Failed: ' + e.message, 'bad');
+  } finally {
+    try { await state.bridge.setRoute(stripIndex, restore); } catch { /* logged by refresh */ }
+    await refreshVoicemeeter();
+    state.syncRunning = false;
+    $('btn-sync-combos').disabled = false;
+    $('btn-sync-solve').disabled = false;
+    $('btn-sync-stop').hidden = true;
+    $('sync-progress').firstElementChild.style.width = '100%';
+    log('ok', '=== COMBINATION RUN COMPLETE ===');
+    setStatus('sync-status', 'Combination run finished. Routing restored.', 'ok');
+  }
+}
+
 // --------------------------------------------------------------- results --
 
 function copyBtnHtml(text) {
@@ -874,7 +1248,18 @@ function wireHandlers() {
     setStatus('batch-status', 'Stopping after the current measurement…', 'warn');
   };
 
-  $('btn-bridge-connect').onclick = connectBridge;
+  $('btn-bridge-connect').onclick = () => connectBridge().catch(() => { /* status already shown */ });
+  $('vm-watch').onchange = (e) => {
+    if (e.target.checked) { startVoicemeeterWatch(); log('info', 'Following Voicemeeter changes'); }
+    else { stopVoicemeeterWatch(); log('info', 'Stopped following Voicemeeter changes'); }
+  };
+  $('btn-sync-solve').onclick = runSyncSolve;
+  $('btn-sync-apply').onclick = applySyncPlan;
+  $('btn-sync-combos').onclick = runCombinations;
+  $('btn-sync-stop').onclick = () => {
+    state.syncAbort = true;
+    setStatus('sync-status', 'Stopping after the current measurement…', 'warn');
+  };
   $('btn-vm-refresh').onclick = async () => {
     // Re-read the device list too: buses can be reassigned in Voicemeeter itself.
     state.bridgeDevices = null;
@@ -983,6 +1368,8 @@ async function boot() {
       toast('Audio devices changed — list updated');
     }
   });
+
+  autoConnectBridge();
 }
 
 boot();

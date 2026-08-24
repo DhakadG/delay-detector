@@ -8,6 +8,7 @@ export default [
         window: 'readonly', document: 'readonly', navigator: 'readonly',
         localStorage: 'readonly', performance: 'readonly', console: 'readonly',
         setTimeout: 'readonly', clearTimeout: 'readonly', confirm: 'readonly',
+        setInterval: 'readonly', clearInterval: 'readonly',
         requestAnimationFrame: 'readonly', cancelAnimationFrame: 'readonly',
         AudioContext: 'readonly', AudioWorkletNode: 'readonly', Blob: 'readonly',
         URL: 'readonly', MutationObserver: 'readonly', Event: 'readonly',
