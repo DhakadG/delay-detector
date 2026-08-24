@@ -119,6 +119,15 @@ public static class VoicemeeterControl
     [DllImport(Dll, EntryPoint = "VBVMR_GetParameterStringA", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
     private static extern int VBVMR_GetParameterStringA([MarshalAs(UnmanagedType.LPStr)] string name, byte[] buffer);
 
+    // The ...W entry point returns UTF-16, so device names containing characters
+    // outside the ANSI codepage (the emoji in "Speakers (LotsOfHusky ...)") survive.
+    // The A entry point substitutes '?' for them before we ever see the bytes.
+    [DllImport(Dll, EntryPoint = "VBVMR_GetParameterStringW", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
+    // The buffer is an explicit IntPtr, not char[]: under CharSet.Ansi (which the
+    // ANSI parameter name forces) the marshaller would hand the DLL a byte array
+    // and every wide string would come back empty.
+    private static extern int VBVMR_GetParameterStringW([MarshalAs(UnmanagedType.LPStr)] string name, IntPtr buffer);
+
     [DllImport(Dll, EntryPoint = "VBVMR_SetParameterStringA", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
     private static extern int VBVMR_SetParameterStringA([MarshalAs(UnmanagedType.LPStr)] string name,
                                                         [MarshalAs(UnmanagedType.LPStr)] string value);
@@ -222,20 +231,41 @@ public static class VoicemeeterControl
     public static string GetString(string name)
     {
         if (!Connect()) return "";
+
+        // 512 wide chars: the size Voicemeeter's own C example uses for the ANSI
+        // form, doubled for UTF-16. Undersizing it is a buffer overrun, not a
+        // truncation, so this is not a knob to shave.
+        const int Chars = 512;
+        var buf = Marshal.AllocHGlobal(Chars * 2);
         try
         {
-            // 512 is the buffer size Voicemeeter's own C example uses.
-            var buf = new byte[512];
-            if (VBVMR_GetParameterStringA(name, buf) != 0) return "";
-            int n = Array.IndexOf(buf, (byte)0);
+            Marshal.WriteInt16(buf, 0, 0);
+            if (VBVMR_GetParameterStringW(name, buf) == 0)
+            {
+                var s = Marshal.PtrToStringUni(buf, Chars);
+                if (s is not null) return Trim(s);
+            }
+        }
+        catch (EntryPointNotFoundException) { /* pre-3.x DLL: fall through to the ANSI form */ }
+        catch { return ""; }
+        finally { Marshal.FreeHGlobal(buf); }
+
+        try
+        {
+            var ansi = new byte[512];
+            if (VBVMR_GetParameterStringA(name, ansi) != 0) return "";
+            int n = Array.IndexOf(ansi, (byte)0);
             // Latin1, not ASCII: the ...StringA entry points return single-byte
-            // ANSI, and ASCII.GetString would replace every byte >127 with '?',
-            // mangling accented device names. Characters Voicemeeter itself
-            // could not fit in one byte (e.g. an emoji in a device name) arrive
-            // already substituted — that loss is in the A API, not here.
-            return Encoding.Latin1.GetString(buf, 0, n < 0 ? buf.Length : n);
+            // ANSI, and ASCII.GetString would replace every byte >127 with '?'.
+            return Encoding.Latin1.GetString(ansi, 0, n < 0 ? ansi.Length : n).Trim();
         }
         catch { return ""; }
+    }
+
+    private static string Trim(string s)
+    {
+        int n = s.IndexOf(' ');
+        return (n < 0 ? s : s[..n]).Trim();
     }
 
     public static bool SetString(string name, string value)
@@ -252,17 +282,35 @@ public static class VoicemeeterControl
     public sealed record BusInfo(int Index, string Label, string Device, double DelayMs);
     public sealed record StripInfo(int Index, string Label, bool[] A, bool[] B);
 
+    /// <summary>GUI name of a bus: A1..An are the physical buses, B1..Bn the virtual
+    /// ones that follow them. Used when a bus carries no user Label, so a table never
+    /// shows a blank cell where an identity belongs.</summary>
+    public static string BusName(Edition e, int i)
+    {
+        int na = ACount(e);
+        return i < na ? $"A{i + 1}" : $"B{i - na + 1}";
+    }
+
+    public static string StripName(Edition e, int i)
+    {
+        // Physical strips come first; the virtual ones are what Voicemeeter's GUI
+        // labels "Voicemeeter VAIO"/"AUX"/"VAIO3".
+        int physical = e switch { Edition.Standard => 2, Edition.Banana => 3, Edition.Potato => 5, _ => 0 };
+        return i < physical ? $"IN {i + 1}" : $"VIRT {i - physical + 1}";
+    }
+
     public static List<BusInfo> Buses()
     {
         var st = Query();
         var list = new List<BusInfo>();
         for (int i = 0; i < BusCount(st.Type); i++)
         {
-            // device.name is read-only and empty for virtual buses — expected,
-            // not an error. Option.delay[i] likewise only exists on physical ones.
+            // Option.delay[i] exists only on the physical buses; device.name is empty
+            // for the virtual ones. Neither is an error, so neither is reported as one.
             TryGetFloat($"Option.delay[{i}]", out float delay);
-            list.Add(new BusInfo(i, GetString($"Bus[{i}].Label"),
-                                 GetString($"Bus[{i}].device.name"), delay));
+            var label = GetString($"Bus[{i}].Label");
+            if (label.Length == 0) label = BusName(st.Type, i);
+            list.Add(new BusInfo(i, label, GetString($"Bus[{i}].device.name"), delay));
         }
         return list;
     }
@@ -280,7 +328,9 @@ public static class VoicemeeterControl
             var b = new bool[nb];
             for (int k = 0; k < nb; k++)
                 b[k] = TryGetFloat($"Strip[{i}].B{k + 1}", out float v) && v >= 0.5f;
-            list.Add(new StripInfo(i, GetString($"Strip[{i}].Label"), a, b));
+            var label = GetString($"Strip[{i}].Label");
+            if (label.Length == 0) label = StripName(st.Type, i);
+            list.Add(new StripInfo(i, label, a, b));
         }
         return list;
     }

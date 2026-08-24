@@ -25,42 +25,99 @@ The DSP in `Dsp.cs` is a deliberate straight port of `src/engine.js`. If the
 two disagreed on the maths, comparing their numbers would say nothing about
 the audio path — which is the whole point of having both.
 
-## Build
+## How to run
 
-```bash
-cd native/DelayProbe
-dotnet publish -c Release -o ../dist
+There is no `delayprobe` on your `PATH`. The build puts the exe under
+`bin\Release\...`, so typing `delayprobe` in the source folder gives
+`'delayprobe' is not recognized`. Use one of the two routes below, and type the
+commands exactly — the `<angle brackets>` in older docs were placeholders, not
+something to type.
+
+### Route 1 — publish to `native\dist` (recommended)
+
+```powershell
+cd "C:\Users\lost_husky\Downloads\Programs\VS Code Works\delay-detector\native\DelayProbe"
+dotnet publish -c Release -o ..\dist
+cd ..\dist
+.\delayprobe.exe devices
 ```
 
-Produces a self-contained `native/dist/delayprobe.exe` with no runtime to
-install.
+`dist\delayprobe.exe` is self-contained: no .NET runtime to install, and it can
+be copied anywhere. From then on, `cd` into `native\dist` and prefix commands
+with `.\` — PowerShell will not run an exe from the current directory without
+it.
 
-## Use
+### Route 2 — run straight out of the build folder
 
-```bash
-delayprobe devices
-delayprobe measure --output 3 --rounds 5
-delayprobe measure --output "Bluetooth" --exclusive --rounds 5 --json
-delayprobe serve --port 8765
+```powershell
+cd "C:\Users\lost_husky\Downloads\Programs\VS Code Works\delay-detector\native\DelayProbe"
+dotnet build -c Release
+.\bin\Release\net8.0-windows\win-x64\delayprobe.exe devices
 ```
 
-Exit code is 0 only when every round produced a trustworthy result, so it can
-be scripted.
+### Real commands
+
+```powershell
+.\delayprobe.exe devices
+.\delayprobe.exe listen --input 1 --seconds 5
+.\delayprobe.exe listen --input 1 --seconds 5 --raw
+.\delayprobe.exe measure --output 2 --input 1 --rounds 3
+.\delayprobe.exe measure --output "Realtek" --input 1 --exclusive --rounds 5 --json
+.\delayprobe.exe voicemeeter
+.\delayprobe.exe logs --open
+.\delayprobe.exe serve --port 8765
+```
+
+`--output` and `--input` take the **index** from `delayprobe devices`, the full
+endpoint **ID**, or any **substring** of the friendly name. Exit code is 0 only
+when every round produced a trustworthy result, so it can be scripted.
 
 ### Interactive mode
 
 Running `delayprobe.exe` with **no arguments** from a real console (that is,
-double-clicking it in Explorer) opens a numbered menu — list devices, run a
-measurement, show Voicemeeter state, start the bridge server, quit — and waits
-for input, so the window no longer flashes open and vanish.
+double-clicking it in Explorer) opens a numbered menu — devices, measurement,
+Voicemeeter state, bridge server, capture diagnostic, run-log folder — and waits
+for input, so the window no longer flashes open and vanishes.
 
 With any argument, or when stdin is redirected (pipes, CI, scripts), behaviour
-and exit codes are exactly as before. `delayprobe --help` still prints help.
+and exit codes are unchanged. `delayprobe --help` still prints help.
+
+## Diagnosing a bad capture
+
+```powershell
+.\delayprobe.exe listen --input 1 --seconds 5 --raw
+```
+
+`listen` captures only — no playback, no DSP — and prints the negotiated format
+(including the `WaveFormatExtensible` SubFormat GUID), the endpoint volume and
+mute state, per-channel peak/RMS every 100 ms, and with `--raw` a hex dump of
+the first non-silent buffer next to its float32 / int32 / int16 readings.
+
+Two flags split "is it us, or is it the machine":
+
+- `--processed` leaves the endpoint's audio-processing objects in the path.
+  This is what NAudio does by default, and it is what used to break `measure` —
+  see Status.
+- `--winmm` captures the same device over WinMM instead of WASAPI.
+
+## Run logs
+
+Every measurement — CLI, interactive menu, or bridge — writes to:
+
+```
+%LOCALAPPDATA%\delayprobe\runs\YYYY-MM-DD\HHMMSS-<device>\
+    run.json   per-repeat delays, formats, capture levels, options
+    run.log    the console transcript of that run
+```
+
+`delayprobe logs` prints the folder; `delayprobe logs --open` opens it in
+Explorer. Logging failures are swallowed — a full disk must not cost you a
+measurement you just spent ten seconds making noise for.
 
 ### Bridge server
 
-```bash
-delayprobe serve [--port 8765]
+```powershell
+.\delayprobe.exe serve --port 8765
 ```
 
 Runs a small HTTP server so the hosted web app can drive the native probe.
@@ -119,6 +176,28 @@ It matters here because measuring two outputs is only half the job:
 - **Bus device** — `Bus[i].device.wdm` / `.ks` / `.mme` (write-only; the result
   reads back from `Bus[i].device.name`).
 
+Strings are read with **`VBVMR_GetParameterStringW`**, not the ANSI form. The
+ANSI entry point substitutes `?` for anything outside the codepage (the emoji in
+"Speakers (LotsOfHusky 👀)") and, on this machine, returned nothing at all for
+`Bus[i].device.name` when `i > 0`. Where a `Label` is empty — the normal state
+until the user types one — the GUI name (`A1`, `A2`, …, `B1`) is shown instead
+of a blank cell.
+
+### Client registration
+
+The Remote API supports **at most 4 client applications at once**
+(`VoicemeeterRemoteAPI.txt` §1) and provides **no function to enumerate or evict
+registered clients**. There is no such entry point in the DLL, so no tool can
+show you who is holding a slot; the only defence is that every client logs in
+once and logs out on the way out.
+
+`delayprobe` logs in lazily, exactly once per process (guarded in
+`VoicemeeterControl.Connect`), and calls `VBVMR_Logout` from
+`AppDomain.ProcessExit` and `Console.CancelKeyPress` — covering a normal exit,
+quitting the interactive menu, Ctrl+C, and bridge shutdown. If you have stray
+clients from other applications, the fix is to close them or restart
+Voicemeeter; this tool cannot evict them.
+
 All Voicemeeter indices are **zero-based**: `Bus[0]` is the bus labelled "A1"
 in the GUI, `Strip[0]` is the leftmost input strip. Bus/strip counts come from
 the edition (`VBVMR_GetVoicemeeterType`: 1 = Standard/2 buses, 2 = Banana/5,
@@ -126,33 +205,68 @@ the edition (`VBVMR_GetVoicemeeterType`: 1 = Standard/2 buses, 2 = Banana/5,
 
 ## Status — read this before trusting a number
 
-**The bridge, device enumeration and Voicemeeter control work. The measurement path does not
-produce a usable number on this machine yet.**
+### Verified by running, on this machine, against live hardware
 
-Verified working:
-- `delayprobe devices`, the interactive menu, and `delayprobe serve` (health, devices,
-  voicemeeter state, CORS preflight, error handling).
-- Voicemeeter control, exercised against a live Voicemeeter Banana: edition detection, bus
-  labels and devices, `Option.delay[i]`, and strip A/B routing read+write.
+**Capture is fixed.** `measure` was recording silence because the Realtek
+"Microphone Array" endpoint runs a noise-suppression APO in the shared-mode
+signal path that emits **exact digital zeros** for anything it does not classify
+as speech — including every measurement sweep. Opening the capture client with
+`AUDCLNT_STREAMOPTIONS_RAW` bypasses the endpoint's APO chain. Same mic, same
+minute, `delayprobe listen`:
 
-Known broken:
-- **`measure` captures silence.** On this machine the capture stream opens correctly
-  (48 kHz, 2 ch, 32-bit float, matching the render endpoint) and delivers the right number of
-  buffers, but every sample is ~-110 dBFS RMS — digital silence, not a quiet room. Windows
-  hands silence rather than an error to a desktop app that lacks microphone permission, which
-  is the most likely cause. Check:
-  `Settings -> Privacy & security -> Microphone -> Let desktop apps access your microphone`.
-  The tool now reports the captured peak level and rejects the run with an explicit reason
-  instead of returning `NaN`, so this is at least diagnosable.
-- **Absolute latency is not calibrated.** `WasapiOut.Play()` returns before audio actually
-  leaves the endpoint, so the emission reference understates the true start by roughly the
-  output buffer latency. A *differential* between two devices measured identically is
-  unaffected; a single absolute figure from this tool is not yet trustworthy. The browser app
-  solves the equivalent problem by emitting from inside the capture worklet so both timestamps
-  come from one clock; the native path needs the analogous fix (an
-  `IAudioClock`/`GetPosition`-based reference, or loopback capture as the timing reference).
-- `--loopback` only opens the stream; the before/after-the-DAC split is not implemented.
-- Exclusive mode, and the Standard/Potato Voicemeeter editions, are compiled but never run.
+| stream | peak | RMS |
+|---|---|---|
+| `--processed` (what NAudio does by default) | **-240 dBFS** (all-zero buffers) | -240 dBFS |
+| RAW (now the default) | **-3.3 dBFS** | **-33.3 dBFS** |
 
-Until the capture-silence issue is resolved, use the web app at https://delay.losthusky.qzz.io
-for measurements and this tool for Voicemeeter control and device enumeration.
+The RAW RMS matches what Chrome reports for the same microphone, because
+`getUserMedia` with the processing constraints off asks for the same raw stream.
+`--winmm` reads ~-90 dBFS, i.e. WinMM goes through the same APO chain and is
+*not* a workaround — the fault was never in the WASAPI setup, the byte decoding,
+or device permissions.
+
+NAudio 2.2.1 exposes no hook for this, so `RawMode` reaches the underlying
+`IAudioClient2` through two private fields of the pinned NAudio version. If a
+future NAudio breaks that, RAW is reported as DENIED and capture continues
+processed rather than failing.
+
+Also verified by running:
+
+- `delayprobe measure` end to end: 2/2 good rounds, jitter ±0.0001 ms,
+  correlation peak ~25 dB, capture peak -11 dBFS.
+- `delayprobe listen` with `--raw`, `--processed`, `--winmm` and `--legacy`.
+- `delayprobe devices`, `delayprobe voicemeeter`, `delayprobe logs`.
+- Run logging: `run.json` + `run.log` written per measurement.
+- `delayprobe serve`: `/health` and `/voicemeeter/state` against the live
+  Banana instance.
+- Voicemeeter Banana, live: edition detection, bus device names for **all**
+  physical buses (A1/A2/A3), label fallbacks, `Option.delay[i]`, and strip A/B
+  routing — **read only. Nothing was written to the live instance.**
+
+### Compiled but not exercised
+
+- Exclusive-mode render, `--loopback`, and the Voicemeeter Standard/Potato
+  editions.
+- Voicemeeter *write* paths (`SetStripRouting`, `SetBusDelay`, `SetBusDevice`).
+- The interactive menu's new layout: its helpers are exercised by the CLI
+  commands that share them, but the menu itself was not driven by hand.
+
+### Still broken / known limits
+
+- **Absolute latency is not calibrated.** `WasapiOut.Play()` returns before
+  audio actually leaves the endpoint, so the emission reference understates the
+  true start by roughly the output buffer latency. A *differential* between two
+  devices measured identically is unaffected; a single absolute figure from this
+  tool is not yet trustworthy. The fix is an `IAudioClock`/`GetPosition`-based
+  reference, or using loopback capture as the timing reference.
+- **Voicemeeter can make the physical outputs unopenable.** With Banana holding
+  A1/A2/A3, `measure --output 0|1|3` fails with `0x8889000A`
+  (`AUDCLNT_E_DEVICE_IN_USE`) — Voicemeeter has them in exclusive mode. Measure
+  through `Voicemeeter Input (VB-Audio Voicemeeter VAIO)` instead, or set those
+  buses to MME in Voicemeeter.
+- **RAW capture bypasses the endpoint's gain stage too**, so a mic that peaked
+  at -23 dBFS processed can read above 0 dBFS raw. The stream is 32-bit float,
+  which does not clip above 1.0, and the matched filter is amplitude-insensitive
+  — but do not read the raw peak as a calibrated level.
+- `--loopback` only opens the stream; the before/after-the-DAC split is not
+  implemented.

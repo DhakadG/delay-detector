@@ -45,6 +45,13 @@ public static class Program
 
     public static int Main(string[] args)
     {
+        // Voicemeeter allows at most 4 remote clients and offers no way to
+        // enumerate or evict them, so a client that exits without logging out
+        // burns a slot until the service notices. Cover all three exits:
+        // normal return, Ctrl+C, and anything that unwinds to process exit.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => VoicemeeterControl.Logout();
+        Console.CancelKeyPress += (_, e) => { e.Cancel = false; VoicemeeterControl.Logout(); };
+
         // Double-clicking the exe from Explorer used to print help and exit,
         // so the console window flashed and vanished before it could be read.
         // With no arguments AND a real console attached, drop into a menu that
@@ -74,7 +81,20 @@ public static class Program
                     --rounds <n>         repeat the whole measurement n times
                     --json               emit JSON only, for scripting
 
-                  delayprobe serve [--port 8765]
+                  delayprobe listen --input 1 --seconds 5 [--raw] [--processed] [--winmm]
+                      Capture-only diagnostic: negotiated format, per-channel
+                      levels every 100 ms, and with --raw a hex dump of the first
+                      non-silent buffer. --processed leaves the endpoint's audio
+                      effects in the path (they can delete the sweep outright);
+                      --winmm cross-checks the same device over WinMM.
+
+                  delayprobe voicemeeter
+                      Print Voicemeeter buses, strips and routing.
+
+                  delayprobe logs [--open]
+                      Print (and optionally open) the per-run log folder.
+
+                  delayprobe serve --port 8765
                       Run the local HTTP bridge on 127.0.0.1 so the web app can
                       drive this probe. See native/README.md.
 
@@ -91,6 +111,9 @@ public static class Program
             {
                 "devices" => ListDevices(),
                 "measure" => Measure(args),
+                "listen" => Diagnostics.Listen(args),
+                "voicemeeter" or "vm" => Ui.ShowVoicemeeter(),
+                "logs" => RunLog.ShowFolder(args.Contains("--open")),
                 "serve" => BridgeServer.Run(int.TryParse(Arg(args, "--port"), out var p) ? p : 8765),
                 _ => Fail($"unknown command '{args[0]}' — try --help"),
             };
@@ -110,15 +133,7 @@ public static class Program
     internal static int ListDevices()
     {
         using var en = new MMDeviceEnumerator();
-        Console.WriteLine("Render (outputs):");
-        var render = en.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
-        for (int i = 0; i < render.Count; i++)
-            Console.WriteLine($"  [{i}] {render[i].FriendlyName}\n      {render[i].ID}");
-
-        Console.WriteLine("\nCapture (inputs):");
-        var capture = en.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active).ToList();
-        for (int i = 0; i < capture.Count; i++)
-            Console.WriteLine($"  [{i}] {capture[i].FriendlyName}\n      {capture[i].ID}");
+        Ui.DeviceTables(en, withIds: true);
         return 0;
     }
 
@@ -136,7 +151,7 @@ public static class Program
             ?? throw new ArgumentException($"no {flow} device matching '{spec}'");
     }
 
-    private static string? Arg(string[] a, string name)
+    internal static string? Arg(string[] a, string name)
     {
         int i = Array.IndexOf(a, name);
         return i >= 0 && i + 1 < a.Length ? a[i + 1] : null;
@@ -163,10 +178,8 @@ public static class Program
         }
 
         var results = RunRounds(outDev, inDev, exclusive, repeats, rounds, json ? null : (round, res) =>
-            Console.WriteLine(
-                $"round {round}: {res.DelayMs,8:F2} ms  settled {res.SettledMs,8:F2} ms  " +
-                $"jitter ±{res.JitterMs:F2} ms  drift {res.DriftMsPerSec,6:F2} ms/s  " +
-                $"peak {res.QualityDb:F0} dB  {(res.Ok ? "ok" : res.Reason)}"), !json);
+            Ui.Line(res.Ok ? ConsoleColor.DarkGray : ConsoleColor.Red,
+                    $"  round {round} of {rounds}: {(res.Ok ? $"{res.DelayMs:F2} ms" : res.Reason)}"), !json);
 
         var good = results.Where(x => x.Ok).ToList();
         if (json)
@@ -186,11 +199,7 @@ public static class Program
                 medianDelayMs = good.Count > 0 ? Dsp.Median(good.Select(x => x.DelayMs).ToArray()) : (double?)null,
             }, new JsonSerializerOptions { WriteIndented = true }));
         }
-        else if (good.Count > 0)
-        {
-            Console.WriteLine($"\nmedian across {good.Count} good round(s): " +
-                              $"{Dsp.Median(good.Select(x => x.DelayMs).ToArray()):F2} ms");
-        }
+        else Ui.ResultsTable(results);
 
         return good.Count == results.Count ? 0 : 1;
     }
@@ -211,14 +220,52 @@ public static class Program
         var results = new List<Dsp.Result>();
         var rand = new Random(12345);
 
+        // Logging wraps the loop rather than each front end, so the CLI, the menu
+        // and the bridge all leave the same record without three call sites to keep
+        // in step. It never throws, so a failure to log cannot lose a measurement.
+        using var log = RunLog.Start(outDev.FriendlyName);
+        log.Note($"output={outDev.FriendlyName}");
+        log.Note($"input={inDev.FriendlyName}");
+        log.Note($"mode={(exclusive ? "exclusive" : "shared")} repeats={repeats} rounds={rounds}");
+
         for (int round = 1; round <= rounds; round++)
         {
             var res = RunOne(outDev, inDev, opts, exclusive, rand, verbose);
             results.Add(res);
             onRound?.Invoke(round, res);
         }
+
+        var okRounds = results.Where(x => x.Ok).ToList();
+        log.Finish(new
+        {
+            timestamp = DateTimeOffset.Now,
+            version = Ui.Version,
+            output = outDev.FriendlyName,
+            outputId = outDev.ID,
+            input = inDev.FriendlyName,
+            inputId = inDev.ID,
+            options = new { mode = exclusive ? "exclusive" : "shared", repeats, rounds },
+            captureFormat = LastCaptureFormat,
+            captureLevelDb = LastCaptureLevel,
+            rawStream = LastRawStream,
+            rounds = results.Select(x => new
+            {
+                ok = x.Ok, delayMs = x.DelayMs, settledMs = x.SettledMs, jitterMs = x.JitterMs,
+                driftMsPerSec = x.DriftMsPerSec, qualityDb = x.QualityDb,
+                usedRepeats = x.UsedRepeats, delays = x.Delays, reason = x.Reason,
+            }),
+            medianDelayMs = okRounds.Count > 0
+                ? Dsp.Median(okRounds.Select(x => x.DelayMs).ToArray()) : (double?)null,
+        });
         return results;
     }
+
+    // Last-run capture facts, recorded for the run log. Measurements are strictly
+    // sequential (the loop above is the only caller), so a field is enough and a
+    // parallel plumbing of return values is not.
+    internal static string LastCaptureFormat = "";
+    internal static string LastRawStream = "";
+    internal static double[] LastCaptureLevel = Array.Empty<double>();
 
     /// Exposed so the bridge resolves devices by the exact same rules the CLI uses.
     internal static MMDevice ResolveDevice(MMDeviceEnumerator en, DataFlow flow, string? spec)
@@ -235,32 +282,16 @@ public static class Program
     }
 
     /// <summary>
-    /// Converts one WASAPI capture block to mono floats. The previous version assumed the
-    /// shared-mode format was always IEEE float and read it with BitConverter.ToSingle
-    /// unconditionally; against a 16-bit PCM endpoint that reinterprets two PCM samples as
-    /// one float and yields pure garbage, which is exactly how a measurement ends up with
-    /// "too few usable repeats" and no clue why. Handle what the endpoint actually reports.
+    /// Converts one WASAPI capture block to mono floats, taking channel 0 only so the
+    /// frame timing stays exact. Decoding itself lives in <see cref="Audio.Sample"/> —
+    /// having a second copy here is how one path ends up reading int32 as float while
+    /// the diagnostic reads it correctly and the two disagree about what the mic heard.
     /// </summary>
     private static void AppendMono(List<float> dst, byte[] buf, int bytes, WaveFormat fmt)
     {
         int block = fmt.BlockAlign;
         int frames = bytes / block;
-        // WASAPI reports Extensible for most shared-mode endpoints; at 32 bits that is
-        // float in every case this tool will meet. Integer 32-bit is handled below anyway.
-        bool isFloat = fmt.Encoding == WaveFormatEncoding.IeeeFloat
-            || (fmt.Encoding == WaveFormatEncoding.Extensible && fmt.BitsPerSample == 32);
-
-        for (int f = 0; f < frames; f++)
-        {
-            int at = f * block;                       // channel 0 only: keeps timing exact
-            if (isFloat && fmt.BitsPerSample == 32) dst.Add(BitConverter.ToSingle(buf, at));
-            else if (fmt.BitsPerSample == 16) dst.Add(BitConverter.ToInt16(buf, at) / 32768f);
-            else if (fmt.BitsPerSample == 32) dst.Add(BitConverter.ToInt32(buf, at) / 2147483648f);
-            else if (fmt.BitsPerSample == 24)
-                dst.Add(((buf[at + 2] << 16) | (buf[at + 1] << 8) | buf[at]) / 8388608f
-                        - (buf[at + 2] >= 0x80 ? 2f : 0f));
-            else dst.Add(0f);
-        }
+        for (int f = 0; f < frames; f++) dst.Add(Audio.Sample(buf, f * block, 0, fmt));
     }
 
     private static Dsp.Result RunOne(MMDevice outDev, MMDevice inDev, Dsp.Options o, bool exclusive,
@@ -269,8 +300,17 @@ public static class Program
         var mode = exclusive ? AudioClientShareMode.Exclusive : AudioClientShareMode.Shared;
 
         using var capture = new WasapiCapture(inDev) { ShareMode = AudioClientShareMode.Shared };
+
+        // Without RAW the endpoint's own noise-suppression APOs sit in the path and
+        // delete the sweep outright — the Realtek "Microphone Array" here returns exact
+        // digital zeros for anything it does not classify as speech. See RawMode.
+        bool rawOk = RawMode.TryEnable(capture, out string rawDetail);
+
         var capFmt = capture.WaveFormat;
         int sampleRate = capFmt.SampleRate;
+        LastCaptureFormat = $"{capFmt.SampleRate} Hz, {capFmt.Channels} ch, " +
+                            $"{capFmt.BitsPerSample}-bit {capFmt.Encoding}";
+        LastRawStream = rawOk ? "raw" : "processed: " + rawDetail;
 
         // The matched filter correlates the CAPTURED signal against a reference generated at
         // the capture rate. If the render endpoint runs at a different rate the emitted sweep
@@ -281,7 +321,8 @@ public static class Program
         if (verbose)
         {
             Console.WriteLine($"  capture: {sampleRate} Hz, {capFmt.Channels} ch, " +
-                              $"{capFmt.BitsPerSample}-bit {capFmt.Encoding}");
+                              $"{capFmt.BitsPerSample}-bit {capFmt.Encoding}, " +
+                              $"stream {(rawOk ? "RAW" : "processed — " + rawDetail)}");
             Console.WriteLine($"  render : {renderRate} Hz, {renderCh} ch");
             if (renderRate != sampleRate)
                 Console.WriteLine("  NOTE: render and capture rates differ; the sweep is resampled on output.");
@@ -313,6 +354,7 @@ public static class Program
 
         var rec = captured.ToArray();
         var (peakDb, rmsDb) = LevelOf(rec);
+        LastCaptureLevel = new[] { peakDb, rmsDb };
         if (verbose)
             Console.WriteLine($"  captured {rec.Length} frames ({rec.Length / (double)sampleRate:F2}s), " +
                               $"peak {peakDb:F1} dBFS, rms {rmsDb:F1} dBFS");
@@ -321,7 +363,11 @@ public static class Program
         {
             return new Dsp.Result(false, double.NaN, double.NaN, double.NaN, double.NaN, 0, 0, false,
                 0, 0, double.NaN, Array.Empty<double>(),
-                $"the microphone captured effectively nothing (peak {peakDb:F0} dBFS) — check it is not muted");
+                $"the microphone captured effectively nothing (peak {peakDb:F0} dBFS) — " +
+                (rawOk ? "check it is not muted"
+                       : "the endpoint's audio processing could not be bypassed (" + rawDetail +
+                         "), so noise suppression is very likely deleting the sweep; " +
+                         "run 'delayprobe listen' to confirm"));
         }
 
         // NOTE: render.Play() returns as soon as the stream is started, but audio does not
@@ -360,99 +406,5 @@ public static class Program
             }
             return count; // keep the stream alive so timing stays continuous
         }
-    }
-}
-
-/// <summary>
-/// Menu shown when the exe is launched with no arguments from a real console —
-/// i.e. double-clicked in Explorer. Without it the process printed help and
-/// exited instantly, so the window flashed and the user saw nothing. Every
-/// entry just builds the argv the CLI already understands, so there is one
-/// implementation of each command, not two.
-/// </summary>
-internal static class Interactive
-{
-    public static int Run()
-    {
-        while (true)
-        {
-            Console.WriteLine();
-            Console.WriteLine("delayprobe — interactive");
-            Console.WriteLine("  1) list audio devices");
-            Console.WriteLine("  2) run a measurement");
-            Console.WriteLine("  3) Voicemeeter state");
-            Console.WriteLine("  4) start bridge server (for the web app)");
-            Console.WriteLine("  q) quit");
-            Console.Write("> ");
-
-            // Console.ReadLine returns null if stdin closes underneath us
-            // (window closed, redirect appearing late) — exit instead of spinning.
-            var choice = Console.ReadLine()?.Trim();
-            if (choice is null or "q" or "Q" or "quit" or "exit") return 0;
-
-            try
-            {
-                switch (choice)
-                {
-                    case "1": Program.ListDevices(); break;
-                    case "2": MeasurePrompt(); break;
-                    case "3": ShowVoicemeeter(); break;
-                    case "4": StartBridge(); break;
-                    default: Console.WriteLine("pick 1-4 or q"); break;
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("error: " + ex.Message);
-            }
-        }
-    }
-
-    private static string Ask(string prompt, string fallback)
-    {
-        Console.Write(prompt);
-        var s = Console.ReadLine()?.Trim();
-        return string.IsNullOrWhiteSpace(s) ? fallback : s;
-    }
-
-    private static void MeasurePrompt()
-    {
-        Program.ListDevices();
-        Console.WriteLine();
-        var output = Ask("output device (index, id or name): ", "");
-        if (output.Length == 0) { Console.WriteLine("cancelled"); return; }
-        var input = Ask("input device (blank = system default): ", "");
-        var rounds = Ask("rounds [1]: ", "1");
-        var exclusive = Ask("exclusive mode? [y/N]: ", "n");
-
-        var args = new List<string> { "measure", "--output", output, "--rounds", rounds };
-        if (input.Length > 0) { args.Add("--input"); args.Add(input); }
-        if (exclusive.StartsWith('y') || exclusive.StartsWith('Y')) args.Add("--exclusive");
-
-        Console.WriteLine();
-        Program.Measure(args.ToArray());
-    }
-
-    private static void ShowVoicemeeter()
-    {
-        var vm = VoicemeeterControl.Query();
-        if (!vm.Available) { Console.WriteLine("Voicemeeter is not installed (VoicemeeterRemote64.dll not found)."); return; }
-        if (!vm.Running) { Console.WriteLine("Voicemeeter is installed but not running."); return; }
-
-        Console.WriteLine($"edition: {VoicemeeterControl.TypeName(vm.Type)}");
-        Console.WriteLine("buses:");
-        foreach (var b in VoicemeeterControl.Buses())
-            Console.WriteLine($"  [{b.Index}] {b.Label,-16} delay {b.DelayMs,5:F0} ms  {b.Device}");
-        Console.WriteLine("strips:");
-        foreach (var s in VoicemeeterControl.Strips())
-            Console.WriteLine($"  [{s.Index}] {s.Label,-16} A:{string.Concat(s.A.Select(x => x ? '1' : '0'))}" +
-                              $" B:{string.Concat(s.B.Select(x => x ? '1' : '0'))}");
-    }
-
-    private static void StartBridge()
-    {
-        var port = Ask("port [8765]: ", "8765");
-        if (!int.TryParse(port, out int p)) { Console.WriteLine("not a port number"); return; }
-        BridgeServer.Run(p);   // blocks until the listener is closed
     }
 }
