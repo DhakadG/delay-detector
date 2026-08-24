@@ -1,5 +1,7 @@
 # Delay Detector
 
+**Live: https://delay.losthusky.qzz.io**
+
 Measure how far behind your Bluetooth headphones, earbuds, or speakers actually
 are — then get the exact number to paste into VLC, mpv, Plex, or Kodi so lips
 line up again.
@@ -87,7 +89,7 @@ Needs to be served over HTTP (ES modules and `getUserMedia` will not work from
 `file://`):
 
 ```bash
-npx serve .
+npx wrangler dev
 ```
 
 Run the DSP self-check — no hardware or browser needed:

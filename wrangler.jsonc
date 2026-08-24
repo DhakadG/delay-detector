@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "delay-detector",
+  "compatibility_date": "2026-08-24",
+  // Assets-only Worker: no server code, so there is no `main`. Cloudflare
+  // serves the files directly from its edge. See .assetsignore for what is
+  // kept out of the bundle.
+  "assets": {
+    "directory": "./"
+  },
+  "routes": [
+    {
+      "pattern": "delay.losthusky.qzz.io",
+      "custom_domain": true
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

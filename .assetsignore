@@ -1,0 +1,14 @@
+# Source and tooling — not part of the served site.
+node_modules
+.git
+.github
+docs
+test
+README.md
+LICENSE
+package.json
+package-lock.json
+wrangler.jsonc
+.assetsignore
+.gitignore
+.wrangler

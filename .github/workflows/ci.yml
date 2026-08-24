@@ -6,8 +6,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
   test:
@@ -19,18 +17,5 @@ jobs:
           node-version: 22
       - run: node test/engine.test.js
 
-  deploy:
-    needs: test
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: .
-      - id: deploy
-        uses: actions/deploy-pages@v4
+# Deployment is not done here. Cloudflare Workers Builds watches this repo and
+# runs `wrangler deploy` itself on every push to main.
