@@ -16,6 +16,10 @@ const state = {
   currentInputId: null, refDeviceId: null, dutDeviceId: null,
   refMs: null, refDistanceM: null,
   switchable: canSwitchOutput(),
+  // true only once device lists come back with something to switch between —
+  // Android/iOS Chrome and Safari never support setSinkId, so this stays
+  // false there and the UI falls back to a typed label per measurement.
+  canPickOutput: false,
   meterStop: null,
   warnedVirtual: false,
   peakHold: -60, peakHoldT: 0,
@@ -122,6 +126,21 @@ async function initMic(deviceId) {
 
     if (!state.ctx) state.ctx = new AudioContext({latencyHint: 'interactive'});
     await state.ctx.resume();
+    if (state.ctx.state !== 'running') {
+      // Some mobile browsers won't resume from inside an async chain even
+      // when it started with a real tap — they want resume() called
+      // directly from a click handler with nothing awaited first. Offer
+      // that as an explicit fallback rather than silently staying muted.
+      log('warn', 'AudioContext did not resume automatically', {state: state.ctx.state});
+      $('btn-resume-audio').hidden = false;
+      $('btn-resume-audio').onclick = async () => {
+        await state.ctx.resume();
+        if (state.ctx.state === 'running') {
+          $('btn-resume-audio').hidden = true;
+          log('ok', 'Audio resumed');
+        }
+      };
+    }
 
     log(warnings.length ? 'warn' : 'ok', 'Microphone opened', {
       sampleRate: state.ctx.sampleRate,
@@ -131,7 +150,9 @@ async function initMic(deviceId) {
       autoGainControl: settings.autoGainControl,
     });
 
-    state.meterStop = attachLiveMeter(state.ctx, state.stream, {onLevel: updateMeter, canvas: $('scope')});
+    state.meterStop = attachLiveMeter(state.ctx, state.stream, {
+      onLevel: updateMeter, waveCanvas: $('scope-wave'), stripCanvas: $('scope-strip'),
+    });
     $('meter-wrap').hidden = false;
 
     if (warnings.length) {
@@ -170,17 +191,26 @@ async function refreshDeviceLists() {
   fill($('sel-input'), inputs, state.currentInputId);
   $('field-input').hidden = false;
 
-  if (state.switchable && outputs.length) {
+  // setSinkId is unimplemented on Android Chrome, iOS Safari and iOS
+  // Chrome entirely — there is no page-level way to switch or even see the
+  // output device there. Falling back to a typed label (instead of just
+  // hiding the picker) is what actually fixes "I don't see any device
+  // options": there's still something to interact with, it just asks you to
+  // say what you switched to yourself.
+  state.canPickOutput = state.switchable && outputs.length > 0;
+  if (state.canPickOutput) {
     fill($('sel-ref'), outputs, state.refDeviceId);
     fill($('sel-dut'), outputs, state.dutDeviceId);
-    $('field-ref').hidden = false;
-    $('field-dut').hidden = false;
-    $('dut-help').textContent =
-      'Pick a device. The page switches the output itself, so you can work through the list without touching system settings.';
-  } else {
-    $('dut-help').textContent =
-      'This browser cannot switch the audio output from a web page. Change your system output device to the one you want to test, then press the button below. Repeat for each device.';
   }
+  $('field-ref-select').hidden = !state.canPickOutput;
+  $('field-dut-select').hidden = !state.canPickOutput;
+  $('field-ref-label').hidden = state.canPickOutput;
+  $('field-dut-label').hidden = state.canPickOutput;
+
+  $('dut-help').textContent = state.canPickOutput
+    ? 'Pick a device. The page switches the output itself, so you can work through the list without touching system settings.'
+    : 'Your browser can\'t list or switch audio outputs from the page — normal on Android and iOS. Change the output yourself (Bluetooth settings or the volume flyout), type a name for it below, then press Measure. Repeat per device.';
+
   warnIfVirtual([...inputs, ...outputs]);
 }
 
@@ -189,9 +219,10 @@ async function refreshDeviceLists() {
 async function run(which) {
   const statusId = which === 'ref' ? 'ref-status' : 'dut-status';
   const sel = which === 'ref' ? $('sel-ref') : $('sel-dut');
+  const labelInput = which === 'ref' ? $('in-ref-label') : $('in-dut-label');
   const btn = which === 'ref' ? $('btn-ref') : $('btn-dut');
-  const usingSel = state.switchable && !sel.hidden;
-  const deviceLabel = usingSel ? label(sel) : 'Current system output';
+  const usingSel = state.canPickOutput;
+  const deviceLabel = usingSel ? label(sel) : (labelInput.value.trim() || 'Current system output');
   btn.disabled = true;
 
   try {

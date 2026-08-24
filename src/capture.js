@@ -82,68 +82,123 @@ export function watchDeviceChanges(cb) {
   return () => navigator.mediaDevices.removeEventListener('devicechange', cb);
 }
 
+/** Tracks a canvas's backing-store size against its CSS size (devicePixelRatio-aware). */
+function canvasTracker(canvas) {
+  let cctx = null, dpr = 1;
+  return {
+    ensure() {
+      if (!canvas) return false;
+      const d = window.devicePixelRatio || 1;
+      const w = Math.round(canvas.clientWidth * d);
+      const h = Math.round(canvas.clientHeight * d);
+      if (w === 0 || h === 0) return false;
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w; canvas.height = h; dpr = d; // resizing clears the canvas
+        cctx = canvas.getContext('2d');
+      }
+      return true;
+    },
+    get ctx() { return cctx; },
+    get dpr() { return dpr; },
+  };
+}
+
 /**
- * Continuous input meter + oscilloscope, independent of the recorder
- * worklet, so it can run at all times without competing with a measurement.
- * `canvas`, if given, gets a live time-domain waveform drawn onto it every
- * frame — this is the one place to actually see whether the mic is picking
- * up anything at all, which is the first thing to check when a device (in
- * particular in-ear buds, which barely leak sound into the room) produces
- * unreliable readings.
+ * Continuous input meter with two live views, independent of the recorder
+ * worklet so they can run at all times without competing with a measurement.
+ *
+ * `waveCanvas` — the instantaneous waveform, redrawn from scratch every
+ * frame. This is the one to look at for *shape*: is the signal clipping
+ * flat-topped, is it just room hiss with no real content, is it there at
+ * all right now. It has no memory — blink and you miss a brief burst.
+ *
+ * `stripCanvas` — a scrolling amplitude-history strip, the same idea as a
+ * DAW input meter or Audacity's recording view: each instant becomes a thin
+ * column at the right edge and the past scrolls left, so the last few
+ * seconds stay visible. This is the one for *when*: did a repeat's burst
+ * actually arrive, how many, how far apart. Implemented as one `drawImage`
+ * of the canvas onto itself shifted left plus one new column per frame —
+ * cheap, no history array to maintain.
+ *
+ * Together they answer the two different questions a raw waveform alone
+ * can't: "what does this sound like" and "did anything happen a moment ago."
+ *
  * Returns a stop() that tears down the analyser and cancels the animation loop.
  */
-export function attachLiveMeter(ctx, stream, {onLevel, canvas} = {}) {
+export function attachLiveMeter(ctx, stream, {onLevel, waveCanvas, stripCanvas} = {}) {
   const src = ctx.createMediaStreamSource(stream);
   const analyser = ctx.createAnalyser();
-  analyser.fftSize = 2048;
-  analyser.smoothingTimeConstant = 0.6;
+  analyser.fftSize = 1024;
+  // Deliberately little smoothing: a repeat is a ~40ms burst, and heavy
+  // smoothing would blur it into the noise floor before it's visible.
+  analyser.smoothingTimeConstant = 0.3;
   src.connect(analyser);
   const buf = new Float32Array(analyser.fftSize);
 
-  let cctx = null, dpr = 1;
-  function ensureCanvasSize() {
-    const d = window.devicePixelRatio || 1;
-    const w = Math.round(canvas.clientWidth * d);
-    const h = Math.round(canvas.clientHeight * d);
-    if (w === 0 || h === 0) return false;
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w; canvas.height = h; dpr = d;
-      cctx = canvas.getContext('2d');
-    }
-    return true;
-  }
+  const wave = canvasTracker(waveCanvas);
+  const strip = canvasTracker(stripCanvas);
 
-  function drawScope() {
-    if (!canvas || !ensureCanvasSize()) return;
-    const w = canvas.width, h = canvas.height;
-    cctx.clearRect(0, 0, w, h);
-    cctx.strokeStyle = 'rgba(255,255,255,.08)';
-    cctx.lineWidth = 1;
-    cctx.beginPath(); cctx.moveTo(0, h / 2); cctx.lineTo(w, h / 2); cctx.stroke();
+  function drawWave() {
+    if (!wave.ensure()) return;
+    const c = wave.ctx, w = waveCanvas.width, h = waveCanvas.height, dpr = wave.dpr;
+    c.clearRect(0, 0, w, h);
+    c.strokeStyle = 'rgba(255,255,255,.07)';
+    c.lineWidth = 1;
+    c.beginPath(); c.moveTo(0, h / 2); c.lineTo(w, h / 2); c.stroke();
 
-    cctx.beginPath();
-    cctx.strokeStyle = '#35e0c0';
-    cctx.lineWidth = 1.6 * dpr;
-    cctx.shadowColor = '#35e0c0';
-    cctx.shadowBlur = 6 * dpr;
+    c.beginPath();
+    c.strokeStyle = '#35e0c0';
+    c.lineWidth = 1.6 * dpr;
+    c.shadowColor = '#35e0c0';
+    c.shadowBlur = 5 * dpr;
     const step = w / buf.length;
     for (let i = 0; i < buf.length; i++) {
       const x = i * step, y = h / 2 - buf[i] * (h / 2) * 0.9;
-      if (i === 0) cctx.moveTo(x, y); else cctx.lineTo(x, y);
+      if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
     }
-    cctx.stroke();
-    cctx.shadowBlur = 0;
+    c.stroke();
+    c.shadowBlur = 0;
   }
 
-  let raf = null;
-  const tick = () => {
+  const HISTORY_SEC = 5;
+  function drawStrip(dtMs, peakDb, rmsDb) {
+    if (!strip.ensure()) return;
+    const c = strip.ctx, w = stripCanvas.width, h = stripCanvas.height, mid = h / 2, dpr = strip.dpr;
+    const shift = Math.max(1, Math.min(w, (w / HISTORY_SEC) * (dtMs / 1000)));
+
+    c.drawImage(stripCanvas, shift, 0, w - shift, h, 0, 0, w - shift, h);
+    c.clearRect(w - shift, 0, shift, h);
+
+    c.strokeStyle = 'rgba(255,255,255,.07)';
+    c.lineWidth = 1;
+    c.beginPath(); c.moveTo(w - shift, mid); c.lineTo(w, mid); c.stroke();
+
+    const frac = (db) => Math.max(0, Math.min(1, (db + 60) / 60));
+    const color = peakDb > -3 ? '#ff6b6b' : peakDb < -45 ? '#3d434e' : '#35e0c0';
+    const rmsH = frac(rmsDb) * mid;
+    const peakH = frac(peakDb) * mid;
+    const tickPx = Math.max(1, 1.5 * dpr);
+
+    c.fillStyle = color;
+    c.globalAlpha = 0.55;
+    c.fillRect(w - shift, mid - rmsH, shift, rmsH * 2);
+    c.globalAlpha = 1;
+    c.fillRect(w - shift, mid - peakH, shift, tickPx);
+    c.fillRect(w - shift, mid + peakH - tickPx, shift, tickPx);
+  }
+
+  let raf = null, lastT = null;
+  const tick = (t) => {
+    const dtMs = lastT == null ? 16 : Math.min(100, t - lastT);
+    lastT = t;
     analyser.getFloatTimeDomainData(buf);
-    if (onLevel) {
-      let peak = 0, sum = 0;
-      for (const v of buf) { const a = Math.abs(v); if (a > peak) peak = a; sum += v * v; }
-      onLevel({peakDb: 20 * Math.log10(peak || 1e-9), rmsDb: 20 * Math.log10(Math.sqrt(sum / buf.length) || 1e-9)});
-    }
-    drawScope();
+    let peak = 0, sum = 0;
+    for (const v of buf) { const a = Math.abs(v); if (a > peak) peak = a; sum += v * v; }
+    const peakDb = 20 * Math.log10(peak || 1e-9);
+    const rmsDb = 20 * Math.log10(Math.sqrt(sum / buf.length) || 1e-9);
+    if (onLevel) onLevel({peakDb, rmsDb});
+    drawWave();
+    drawStrip(dtMs, peakDb, rmsDb);
     raf = requestAnimationFrame(tick);
   };
   raf = requestAnimationFrame(tick);

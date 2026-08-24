@@ -74,20 +74,23 @@
   .field { display: flex; flex-direction: column; gap: .3rem; }
   .field label { font-size: .72rem; color: var(--mut-2); text-transform: uppercase; letter-spacing: .04em; }
   .field[hidden] { display: none; }
+  .field input[type="text"] { font: inherit; font-size: 16px; padding: .55rem .8rem; border-radius: 10px;
+           border: 1px solid var(--card-line); background: rgba(255,255,255,.02); color: inherit;
+           min-width: 14rem; max-width: 100%; }
 
-  .btn { font: inherit; font-weight: 600; padding: .6rem 1.1rem; border-radius: 999px; border: 1px solid transparent;
-         cursor: pointer; transition: transform .12s, box-shadow .2s, opacity .2s; }
+  .btn { font: inherit; font-weight: 600; padding: .68rem 1.2rem; border-radius: 999px; border: 1px solid transparent;
+         cursor: pointer; transition: transform .12s, box-shadow .2s, opacity .2s; min-height: 44px; }
   .btn:active { transform: scale(.97); }
   .btn:disabled { opacity: .4; cursor: default; transform: none; }
   .btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #06110f;
                  box-shadow: 0 4px 20px -4px color-mix(in srgb, var(--accent) 55%, transparent); }
   .btn.primary:hover:not(:disabled) { box-shadow: 0 6px 26px -4px color-mix(in srgb, var(--accent) 70%, transparent); }
-  .ghost-btn { font: inherit; padding: .45rem .8rem; border-radius: 999px; border: 1px solid var(--card-line);
+  .ghost-btn { font: inherit; padding: .5rem .85rem; min-height: 40px; border-radius: 999px; border: 1px solid var(--card-line);
                background: transparent; color: var(--mut); cursor: pointer; display: inline-flex; align-items: center; gap: .35rem; }
   .ghost-btn:hover { color: var(--fg); border-color: color-mix(in srgb, var(--fg) 30%, transparent); }
-  .ghost-btn.small { font-size: .78rem; padding: .35rem .7rem; }
-  .icon-btn { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--card-line); background: transparent;
-              color: var(--mut); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .ghost-btn.small { font-size: .78rem; padding: .4rem .75rem; min-height: 36px; }
+  .icon-btn { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--card-line); background: transparent;
+              color: var(--mut); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; flex: none; }
   .icon-btn:hover { color: var(--fg); }
   .icon-btn svg { width: 15px; height: 15px; }
   .spinning svg { animation: spin .7s linear infinite; }
@@ -100,9 +103,9 @@
   select.dd-native { display: none; }
   .dd { position: relative; display: inline-block; min-width: 15rem; max-width: 100%; }
   .dd[hidden] { display: none; }
-  .dd-btn { font: inherit; width: 100%; text-align: left; padding: .55rem .9rem; border: 1px solid var(--card-line);
+  .dd-btn { font: inherit; width: 100%; text-align: left; padding: .6rem .9rem; min-height: 44px; border: 1px solid var(--card-line);
             border-radius: 10px; background: rgba(255,255,255,.02); color: inherit; cursor: pointer;
-            display: flex; justify-content: space-between; gap: .5rem; overflow: hidden; }
+            display: flex; align-items: center; justify-content: space-between; gap: .5rem; overflow: hidden; }
   .dd-btn span.txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dd-btn:disabled { opacity: .4; cursor: default; }
   .dd-btn:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 40%, var(--card-line)); }
@@ -121,8 +124,12 @@
   .meter-wrap { display: flex; flex-direction: column; gap: .55rem; margin: .9rem 0 .3rem; }
   .meter-wrap[hidden] { display: none; }
   .meter-wrap .row { width: 100%; }
+  .scope-pair { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; }
+  .scope-col { display: flex; flex-direction: column; gap: .3rem; }
+  .scope-label { font-size: .68rem; color: var(--mut-2); text-transform: uppercase; letter-spacing: .04em; }
   .scope { display: block; width: 100%; height: 64px; border-radius: 10px;
            background: rgba(255,255,255,.02); border: 1px solid var(--card-line); }
+  @media (max-width: 520px) { .scope-pair { grid-template-columns: 1fr; } }
   .meter { position: relative; flex: 1; height: 8px; border-radius: 999px; background: rgba(255,255,255,.06); overflow: visible; }
   .meter-fill { position: absolute; inset: 0; width: 0%; border-radius: 999px;
                 background: linear-gradient(90deg, var(--ok), var(--warn) 78%, var(--bad)); transition: width 70ms linear; }
@@ -133,8 +140,8 @@
   .advanced { margin: .7rem 0; padding: .8rem; border: 1px dashed var(--card-line); border-radius: 10px; }
   .advanced[hidden] { display: none; }
   .advanced label { display: flex; flex-direction: column; gap: .35rem; font-size: .78rem; color: var(--mut); max-width: 16rem; }
-  .advanced input { font: inherit; padding: .45rem .6rem; border-radius: 8px; border: 1px solid var(--card-line);
-                     background: rgba(255,255,255,.02); color: inherit; }
+  .advanced input { font: inherit; font-size: 16px; padding: .5rem .6rem; border-radius: 8px; border: 1px solid var(--card-line);
+                     background: rgba(255,255,255,.02); color: inherit; width: 100%; }
 
   .status { font-size: .85rem; margin: .6rem 0 0; min-height: 1.2em; }
   .status.ok { color: var(--ok); } .status.warn { color: var(--warn); } .status.bad { color: var(--bad); }
@@ -172,6 +179,10 @@
   @media (max-width: 640px) {
     main { grid-template-columns: 1fr; }
     .log-panel { width: 100vw; }
+    .hdr-inner { flex-wrap: wrap; row-gap: .5rem; }
+    .card { padding: 1.05rem 1rem; }
+    .dd, .field input[type="text"] { min-width: 0; width: 100%; }
+    .row > .btn { flex: 1 1 auto; }
   }
 </style>
 </head>
@@ -226,9 +237,19 @@
         <label>Input</label>
         <select id="sel-input"></select>
       </div>
+      <button class="ghost-btn small" id="btn-resume-audio" hidden>Tap to enable audio</button>
     </div>
     <div class="meter-wrap" id="meter-wrap" hidden>
-      <canvas class="scope" id="scope" aria-label="Live microphone waveform"></canvas>
+      <div class="scope-pair">
+        <div class="scope-col">
+          <span class="scope-label">Waveform</span>
+          <canvas class="scope" id="scope-wave" aria-label="Live microphone waveform"></canvas>
+        </div>
+        <div class="scope-col">
+          <span class="scope-label">History (5s)</span>
+          <canvas class="scope" id="scope-strip" aria-label="Microphone level history"></canvas>
+        </div>
+      </div>
       <div class="row">
         <div class="meter"><div class="meter-fill" id="meter-fill"></div><div class="meter-peak" id="meter-peak"></div></div>
         <span class="meter-label mono" id="meter-label">—</span>
@@ -242,7 +263,11 @@
     <p class="hint">Play through your <strong>built-in or wired speaker</strong> and measure it.
     Everything after this is compared against it, which is what cancels out the microphone's own latency.</p>
     <div class="row">
-      <div class="field" id="field-ref" hidden><label>Output</label><select id="sel-ref"></select></div>
+      <div class="field" id="field-ref-select" hidden><label>Output</label><select id="sel-ref"></select></div>
+      <div class="field" id="field-ref-label" hidden>
+        <label>What are you listening on?</label>
+        <input type="text" id="in-ref-label" name="ref-device-label" autocomplete="on" placeholder="e.g. Built-in speakers">
+      </div>
       <button class="btn primary" id="btn-ref">Measure reference</button>
       <button class="ghost-btn small" id="btn-ref-adv">Distance ▾</button>
     </div>
@@ -259,7 +284,11 @@
     <h2>3 · Device under test</h2>
     <p class="hint" id="dut-help"></p>
     <div class="row">
-      <div class="field" id="field-dut" hidden><label>Output</label><select id="sel-dut"></select></div>
+      <div class="field" id="field-dut-select" hidden><label>Output</label><select id="sel-dut"></select></div>
+      <div class="field" id="field-dut-label" hidden>
+        <label>What are you listening on?</label>
+        <input type="text" id="in-dut-label" name="dut-device-label" autocomplete="on" placeholder="e.g. Galaxy Buds Pro 2">
+      </div>
       <button class="btn primary" id="btn-dut">Measure this output</button>
       <button class="ghost-btn small" id="btn-dut-adv">Distance ▾</button>
     </div>
