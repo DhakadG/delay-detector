@@ -31,9 +31,10 @@ function csvField(s) {
 }
 
 export function toCsv(history) {
-  const header = ['timestamp', 'device', 'delta_ms', 'spread_ms', 'confident', 'vlc', 'mpv'];
+  const header = ['timestamp', 'device', 'delta_ms', 'spread_ms', 'confidence', 'vlc', 'mpv'];
   const rows = history.map((h) => [
-    h.timestamp, h.device, h.deltaMs.toFixed(1), h.spreadMs.toFixed(1), h.confident, h.vlc, h.mpv,
+    h.timestamp, h.device, h.deltaMs.toFixed(1), h.spreadMs.toFixed(1),
+    h.confidence || (h.confident ? 'ok' : 'warn'), h.vlc, h.mpv,
   ]);
   return [header, ...rows].map((r) => r.map(csvField).join(',')).join('\n');
 }

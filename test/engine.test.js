@@ -66,6 +66,27 @@ check('picks the direct arrival, not a louder reflection', () => {
   assert.ok(Math.abs(r.delayMs - trueMs) < 1.0, `got ${r.delayMs}, want ${trueMs} (took the reflection?)`);
 });
 
+check('trims a repeat that lands far from the pack', () => {
+  const rand = lcg(4);
+  const st = makeStimulus(SR, {}, rand);
+  const trueMs = 60, trueSamples = Math.round((trueMs / 1000) * SR);
+  const badSamples = Math.round((400 / 1000) * SR); // e.g. a repeat that caught a strong late reflection
+  const rec = new Float32Array(st.signal.length);
+  st.offsets.forEach((off, i) => {
+    const delaySamples = i === 0 ? badSamples : trueSamples; // first repeat is the outlier
+    for (let k = 0; k < st.sweep.length; k++) {
+      const j = off + delaySamples + k;
+      if (j < rec.length) rec[j] += 0.4 * st.sweep[k];
+    }
+  });
+  for (let i = 0; i < rec.length; i++) rec[i] += 0.002 * (rand() * 2 - 1);
+
+  const r = measure(rec, st);
+  assert.equal(r.ok, true, `rejected: ${r.reason}`);
+  assert.ok(Math.abs(r.delayMs - trueMs) < 1.0, `got ${r.delayMs}, want ~${trueMs} (outlier not trimmed?)`);
+  assert.ok(r.trimmedOutliers >= 1, 'expected the 400ms outlier repeat to be trimmed');
+});
+
 check('rejects a capture that is mostly noise', () => {
   const rand = lcg(3);
   const st = makeStimulus(SR, {}, rand);

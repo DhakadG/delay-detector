@@ -1,5 +1,5 @@
 // UI glue. No logic lives here that isn't about the DOM.
-import {differential, playerOffsets} from './engine.js';
+import {differential, playerOffsets, DEFAULTS} from './engine.js';
 import {
   openMic, listDevices, canSwitchOutput, measureOnce, micPermissionState,
   watchDeviceChanges, attachLiveMeter,
@@ -131,7 +131,7 @@ async function initMic(deviceId) {
       autoGainControl: settings.autoGainControl,
     });
 
-    state.meterStop = attachLiveMeter(state.ctx, state.stream, updateMeter);
+    state.meterStop = attachLiveMeter(state.ctx, state.stream, {onLevel: updateMeter, canvas: $('scope')});
     $('meter-wrap').hidden = false;
 
     if (warnings.length) {
@@ -214,11 +214,22 @@ async function run(which) {
 
     log(r.ok ? 'ok' : 'warn', `Measurement complete (${which})`, {
       device: deviceLabel, delayMs: +r.delayMs.toFixed(2), spreadMs: +r.spreadMs.toFixed(2),
-      qualityDb: +r.qualityDb.toFixed(1), usedRepeats: r.usedRepeats, discarded: r.rejected.length, tookMs,
+      qualityDb: +r.qualityDb.toFixed(1), usedRepeats: r.usedRepeats,
+      trimmedOutliers: r.trimmedOutliers, discarded: r.rejected.length, tookMs,
     });
+    if (r.trimmedOutliers) {
+      log('warn', `Discarded ${r.trimmedOutliers} repeat(s) that landed far from the rest — likely a reflection or noise burst, not the direct arrival`);
+    }
 
-    const confidence = r.ok ? 'ok' : 'warn';
-    const caveat = r.ok ? '' : ` — spread wider than usual (${r.reason}), treat as approximate`;
+    // 'bad' (not just 'warn') once the spread is wildly beyond the trust
+    // threshold — that's usually too little of the signal reaching the mic
+    // (e.g. in-ear buds barely leak sound into the room) rather than
+    // ordinary jitter, and deserves a stronger flag than "approximate".
+    const severity = r.ok ? 'ok' : r.spreadMs > DEFAULTS.maxSpreadMs * 3 ? 'bad' : 'warn';
+    const caveat = severity === 'ok' ? ''
+      : severity === 'bad'
+        ? ` — too inconsistent to trust (spread ±${r.spreadMs.toFixed(0)} ms). Move the mic closer, raise the volume, or reduce room noise, then measure again.`
+        : ` — spread wider than usual (${r.reason}), treat as approximate`;
 
     if (which === 'ref') {
       state.refMs = r.delayMs;
@@ -226,7 +237,7 @@ async function run(which) {
       state.refDistanceM = parseFloat($('in-ref-distance').value) || null;
       setStatus(statusId,
         `Reference round trip ${r.delayMs.toFixed(1)} ms (spread ±${r.spreadMs.toFixed(1)} ms, ` +
-        `peak ${r.qualityDb.toFixed(0)} dB)${caveat}. Now measure your devices.`, confidence);
+        `peak ${r.qualityDb.toFixed(0)} dB)${caveat}. Now measure your devices.`, severity);
       setCardEnabled('card-dut', true);
       setStep('ref', 'done');
       setStep('dut', 'current');
@@ -241,12 +252,12 @@ async function run(which) {
       const o = playerOffsets(deltaMs);
       saveEntry({
         timestamp: new Date().toISOString(),
-        device: deviceLabel, deltaMs, spreadMs: r.spreadMs, confident: r.ok,
+        device: deviceLabel, deltaMs, spreadMs: r.spreadMs, confident: r.ok, confidence: severity,
         vlc: o.vlc, mpv: o.mpv, plex: o.plex, kodi: o.kodi, ffmpeg: o.ffmpeg,
       });
       renderHistory();
       setStatus(statusId,
-        `${o.summary} (round trip ${r.delayMs.toFixed(1)} ms, spread ±${r.spreadMs.toFixed(1)} ms)${caveat}`, confidence);
+        `${o.summary} (round trip ${r.delayMs.toFixed(1)} ms, spread ±${r.spreadMs.toFixed(1)} ms)${caveat}`, severity);
       setStep('dut', 'done');
       setStep('results', 'done');
     }
@@ -273,10 +284,12 @@ function renderHistory() {
   $('results-empty').hidden = history.length > 0;
 
   for (const h of history) {
+    // older saved entries predate the 'confidence' tier — fall back to the boolean
+    const sev = h.confidence || (h.confident ? 'ok' : 'warn');
     const tr = document.createElement('tr');
-    if (!h.confident) tr.className = 'warn';
+    if (sev !== 'ok') tr.className = sev;
     tr.innerHTML =
-      `<td>${escapeHtml(h.device)}${h.confident ? '' : ' <span class="badge warn">approx</span>'}</td>` +
+      `<td>${escapeHtml(h.device)}${sev === 'ok' ? '' : ` <span class="badge ${sev}">${sev === 'bad' ? 'unreliable' : 'approx'}</span>`}</td>` +
       `<td class="mono">${h.deltaMs >= 0 ? '+' : ''}${h.deltaMs.toFixed(0)} ms</td>` +
       `<td class="mono">±${h.spreadMs.toFixed(1)} ms</td>` +
       `<td><code class="mono">${h.vlc}</code>${copyBtnHtml(h.vlc)}</td>` +

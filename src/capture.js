@@ -33,11 +33,25 @@ export function inputFingerprint(settings) {
   return `${settings.deviceId || '?'}|${settings.groupId || '?'}|${settings.sampleRate || '?'}`;
 }
 
+/**
+ * Chrome injects "default" and "communications" pseudo-devices alongside the
+ * real device ID for whichever device the OS currently defaults to. They
+ * point at the same hardware, but setSinkId() does not always route them
+ * through the same internal path — targeting the real ID can force a fresh
+ * dedicated output stream where "default" reuses one already open, adding a
+ * real, consistent extra delay that has nothing to do with the hardware.
+ * Comparing a reference measured through "Default - X" against the same
+ * physical X measured by its real ID will show a phantom offset. Filtering
+ * these out means every measurement in a session addresses the same device
+ * the same way.
+ */
+const isAliasDevice = (d) => d.deviceId === 'default' || d.deviceId === 'communications';
+
 export async function listDevices() {
   const all = await navigator.mediaDevices.enumerateDevices();
   return {
-    inputs: all.filter((d) => d.kind === 'audioinput'),
-    outputs: all.filter((d) => d.kind === 'audiooutput'),
+    inputs: all.filter((d) => d.kind === 'audioinput' && !isAliasDevice(d)),
+    outputs: all.filter((d) => d.kind === 'audiooutput' && !isAliasDevice(d)),
   };
 }
 
@@ -69,28 +83,67 @@ export function watchDeviceChanges(cb) {
 }
 
 /**
- * Continuous input meter, independent of the recorder worklet, so it can run
- * at all times without competing with a measurement. Returns a stop() that
- * tears down the analyser and cancels the animation loop.
+ * Continuous input meter + oscilloscope, independent of the recorder
+ * worklet, so it can run at all times without competing with a measurement.
+ * `canvas`, if given, gets a live time-domain waveform drawn onto it every
+ * frame — this is the one place to actually see whether the mic is picking
+ * up anything at all, which is the first thing to check when a device (in
+ * particular in-ear buds, which barely leak sound into the room) produces
+ * unreliable readings.
+ * Returns a stop() that tears down the analyser and cancels the animation loop.
  */
-export function attachLiveMeter(ctx, stream, onLevel) {
+export function attachLiveMeter(ctx, stream, {onLevel, canvas} = {}) {
   const src = ctx.createMediaStreamSource(stream);
   const analyser = ctx.createAnalyser();
-  analyser.fftSize = 1024;
-  analyser.smoothingTimeConstant = 0.65;
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.6;
   src.connect(analyser);
   const buf = new Float32Array(analyser.fftSize);
+
+  let cctx = null, dpr = 1;
+  function ensureCanvasSize() {
+    const d = window.devicePixelRatio || 1;
+    const w = Math.round(canvas.clientWidth * d);
+    const h = Math.round(canvas.clientHeight * d);
+    if (w === 0 || h === 0) return false;
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w; canvas.height = h; dpr = d;
+      cctx = canvas.getContext('2d');
+    }
+    return true;
+  }
+
+  function drawScope() {
+    if (!canvas || !ensureCanvasSize()) return;
+    const w = canvas.width, h = canvas.height;
+    cctx.clearRect(0, 0, w, h);
+    cctx.strokeStyle = 'rgba(255,255,255,.08)';
+    cctx.lineWidth = 1;
+    cctx.beginPath(); cctx.moveTo(0, h / 2); cctx.lineTo(w, h / 2); cctx.stroke();
+
+    cctx.beginPath();
+    cctx.strokeStyle = '#35e0c0';
+    cctx.lineWidth = 1.6 * dpr;
+    cctx.shadowColor = '#35e0c0';
+    cctx.shadowBlur = 6 * dpr;
+    const step = w / buf.length;
+    for (let i = 0; i < buf.length; i++) {
+      const x = i * step, y = h / 2 - buf[i] * (h / 2) * 0.9;
+      if (i === 0) cctx.moveTo(x, y); else cctx.lineTo(x, y);
+    }
+    cctx.stroke();
+    cctx.shadowBlur = 0;
+  }
 
   let raf = null;
   const tick = () => {
     analyser.getFloatTimeDomainData(buf);
-    let peak = 0, sum = 0;
-    for (const v of buf) { const a = Math.abs(v); if (a > peak) peak = a; sum += v * v; }
-    const rms = Math.sqrt(sum / buf.length);
-    onLevel({
-      peakDb: 20 * Math.log10(peak || 1e-9),
-      rmsDb: 20 * Math.log10(rms || 1e-9),
-    });
+    if (onLevel) {
+      let peak = 0, sum = 0;
+      for (const v of buf) { const a = Math.abs(v); if (a > peak) peak = a; sum += v * v; }
+      onLevel({peakDb: 20 * Math.log10(peak || 1e-9), rmsDb: 20 * Math.log10(Math.sqrt(sum / buf.length) || 1e-9)});
+    }
+    drawScope();
     raf = requestAnimationFrame(tick);
   };
   raf = requestAnimationFrame(tick);

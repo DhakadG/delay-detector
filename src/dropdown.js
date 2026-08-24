@@ -4,6 +4,12 @@
 // dispatchEvent('change')) so the rest of the app never has to know this
 // exists; this only changes what the user clicks.
 export function enhanceSelect(select) {
+  // fill() in app.js calls this every time it rebuilds a <select>'s options
+  // (every device refresh). Without this guard, each call built a brand new
+  // wrapper and left the old one in the DOM — still live, still synced by
+  // its own MutationObserver — so the dropdown visibly grew a duplicate copy
+  // of itself on every refresh. Idempotent: re-sync the existing one instead.
+  if (select._ddSync) { select._ddSync(); return; }
   select.classList.add('dd-native');
 
   const wrap = document.createElement('div');
@@ -59,5 +65,6 @@ export function enhanceSelect(select) {
     childList: true, attributes: true, attributeFilter: ['hidden', 'disabled'],
   });
 
+  select._ddSync = sync;
   sync();
 }

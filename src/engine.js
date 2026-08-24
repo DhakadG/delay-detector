@@ -168,7 +168,7 @@ export function measure(rec, stimulus, opts = DEFAULTS) {
   const maxLagSamples = Math.round(o.maxLagSec * sampleRate);
   const c = correlate(rec, sweep, offsets[offsets.length - 1] + maxLagSamples);
 
-  const delays = [], qualities = [], rejected = [];
+  const hits = [], rejected = [];
   for (const off of offsets) {
     const hit = pickArrival(c, off, off + maxLagSamples, sweep.length, o);
     if (!hit) { rejected.push({offset: off, reason: 'no peak'}); continue; }
@@ -176,23 +176,35 @@ export function measure(rec, stimulus, opts = DEFAULTS) {
       rejected.push({offset: off, reason: 'low peak quality', qualityDb: hit.qualityDb});
       continue;
     }
-    delays.push(((hit.index - off) / sampleRate) * 1000);
-    qualities.push(hit.qualityDb);
+    hits.push({delayMs: ((hit.index - off) / sampleRate) * 1000, qualityDb: hit.qualityDb});
   }
 
-  if (delays.length < 3) {
+  if (hits.length < 3) {
     return {
-      ok: false, reason: 'too few usable repeats', delays, rejected,
+      ok: false, reason: 'too few usable repeats', delays: hits.map((h) => h.delayMs), rejected,
       hint: 'Raise the volume, move the mic closer, or check echo cancellation is off.',
     };
   }
+
+  // A repeat can individually pass the peak-quality bar and still have
+  // locked onto a reflection or a stray noise burst instead of the direct
+  // arrival — that shows up as one reading far from the rest, not as low
+  // quality. Trim relative to the untrimmed median, then recompute from
+  // what's left, so one bad repeat in eight can't swing the reported delay.
+  const preTrimMedian = median(hits.map((h) => h.delayMs));
+  const outlierBoundMs = Math.max(8, o.maxSpreadMs * 3);
+  const kept = hits.filter((h) => Math.abs(h.delayMs - preTrimMedian) <= outlierBoundMs);
+  const use = kept.length >= 3 ? kept : hits; // never trim below the usability floor
+  const trimmedOutliers = hits.length - use.length;
+
+  const delays = use.map((h) => h.delayMs);
   const delayMs = median(delays);
   const spreadMs = mad(delays);
   const ok = spreadMs <= o.maxSpreadMs;
   return {
-    ok, delayMs, spreadMs, usedRepeats: delays.length,
-    qualityDb: median(qualities), delays, rejected,
-    reason: ok ? null : 'inconsistent repeats — unstable link or the mic moved',
+    ok, delayMs, spreadMs, usedRepeats: delays.length, trimmedOutliers,
+    qualityDb: median(use.map((h) => h.qualityDb)), delays, rejected,
+    reason: ok ? null : 'inconsistent repeats — unstable link, reflections, or the mic moved',
   };
 }
 
