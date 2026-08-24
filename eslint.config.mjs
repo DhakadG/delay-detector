@@ -14,6 +14,7 @@ export default [
         AudioWorkletProcessor: 'readonly', registerProcessor: 'readonly',
         currentFrame: 'readonly', sampleRate: 'readonly', self: 'readonly',
         caches: 'readonly', fetch: 'readonly',
+        AbortController: 'readonly', AbortSignal: 'readonly', globalThis: 'readonly',
       },
     },
     rules: {

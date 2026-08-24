@@ -2,14 +2,16 @@
 import {differential, playerOffsets, DEFAULTS, median, mad} from './engine.js';
 import {
   openMic, listDevices, canSwitchOutput, measureOnce, micPermissionState,
-  watchDeviceChanges, attachLiveMeter,
+  watchDeviceChanges,
 } from './capture.js';
+import {attachMeter} from './meter.js';
 import {enhanceSelect} from './dropdown.js';
 import {initLog, log, exportLog, clearLog, installGlobalHandlers} from './log.js';
 import {loadHistory, saveEntry, clearHistory, toCsv} from './store.js';
 import {BUILD, BUILT_AT} from './version.js';
 import {buildBatchPlan, estimateBatchSeconds, summariseBatch} from './batch.js';
-import {confirmDialog} from './dialog.js';
+import {confirmDialog, promptNumber} from './dialog.js';
+import {createBridge, describeBridgeError, DEFAULT_BRIDGE_URL} from './bridge.js';
 
 const $ = (id) => document.getElementById(id);
 const isVirtual = (label) => /voicemeeter|vb-audio|virtual cable/i.test(label || '');
@@ -25,8 +27,8 @@ const state = {
   canPickOutput: false,
   meter: null,
   warnedVirtual: false,
-  peakHold: -60, peakHoldT: 0,
   outputs: [],
+  bridge: createBridge({baseUrl: DEFAULT_BRIDGE_URL}),
   batchAbort: false, batchRunning: false,
 };
 
@@ -99,24 +101,6 @@ function warnIfVirtual(devices) {
   toast('Virtual audio device detected — see the session log');
 }
 
-// ---------------------------------------------------------------- meter ---
-
-function updateMeter({peakDb, rmsDb}) {
-  const now = performance.now();
-  if (peakDb > state.peakHold || now - state.peakHoldT > 1400) {
-    state.peakHold = peakDb; state.peakHoldT = now;
-  } else {
-    state.peakHold = Math.max(peakDb, state.peakHold - 0.7);
-  }
-  const pct = (db) => Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
-  $('meter-fill').style.width = pct(rmsDb) + '%';
-  $('meter-peak').style.left = pct(state.peakHold) + '%';
-  const cls = peakDb > -3 ? 'bad' : peakDb < -45 ? 'warn' : 'ok';
-  const lbl = $('meter-label');
-  lbl.textContent = `${rmsDb.toFixed(0)} dB · peak ${peakDb.toFixed(0)} dB`;
-  lbl.className = 'meter-label mono ' + cls;
-}
-
 // ------------------------------------------------------------------ mic ---
 
 async function initMic(deviceId) {
@@ -155,8 +139,10 @@ async function initMic(deviceId) {
       autoGainControl: settings.autoGainControl,
     });
 
-    state.meter = attachLiveMeter(state.ctx, state.stream, {
-      onLevel: updateMeter, waveCanvas: $('scope-wave'), stripCanvas: $('scope-strip'),
+    state.meter = attachMeter(state.ctx, state.stream, {
+      waveCanvas: $('scope-wave'), stripCanvas: $('scope-strip'),
+      fillEl: $('meter-fill'), peakEl: $('meter-peak'),
+      labelEl: $('meter-label'), clipEl: $('meter-clip'),
     });
     $('meter-wrap').hidden = false;
 
@@ -400,6 +386,79 @@ async function run(which) {
     setStatus(statusId, 'Failed: ' + e.message, 'bad');
   } finally {
     btn.disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------- bridge ---
+
+function setBridgeStatus(text, cls = '') {
+  const el = $('bridge-status');
+  el.textContent = text;
+  el.className = 'note ' + cls;
+}
+
+/**
+ * Voicemeeter's per-bus output delay is the knob that makes a wired output line up
+ * with a Bluetooth one: measure the difference, then delay the faster bus by it.
+ * Writing it from here saves reading a number off one screen and typing it into another.
+ */
+function renderVoicemeeter(st) {
+  const wrap = $('vm-wrap'), body = $('vm-buses');
+  body.innerHTML = '';
+  if (!st?.running || !st.buses?.length) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+
+  for (const bus of st.buses) {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td class="mono">A${bus.index + 1}</td>` +
+      `<td>${escapeHtml(bus.label || '')}</td>` +
+      `<td>${escapeHtml(bus.device || '—')}</td>` +
+      `<td class="mono">${Number(bus.delayMs ?? 0).toFixed(0)} ms</td>`;
+    const td = document.createElement('td');
+    const btn = document.createElement('button');
+    btn.className = 'ghost-btn small';
+    btn.textContent = 'Set delay';
+    btn.onclick = async () => {
+      const ms = await promptNumber({
+        title: `Output delay for A${bus.index + 1}`,
+        body: `Delays everything leaving this bus. To line a fast wired output up with a slow ` +
+              `Bluetooth one, delay the fast bus by the difference you measured.`,
+        value: String(Math.round(bus.delayMs ?? 0)),
+        min: 0, max: 500, unit: 'ms', confirmText: 'Apply',
+      });
+      if (ms == null) return;
+      try {
+        await state.bridge.setDelay(bus.index, ms);
+        log('ok', 'Voicemeeter bus delay set', {bus: bus.index, ms});
+        toast(`A${bus.index + 1} delay set to ${ms} ms`);
+        renderVoicemeeter(await state.bridge.voicemeeterState());
+      } catch (e) {
+        log('bad', 'Could not set Voicemeeter delay', {code: e.code, error: e.message});
+        toast(describeBridgeError(e));
+      }
+    };
+    td.appendChild(btn);
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+}
+
+async function connectBridge() {
+  setBridgeStatus('connecting…');
+  try {
+    const info = await state.bridge.connect();
+    const vm = info.voicemeeter;
+    const vmText = vm.running ? `Voicemeeter ${vm.type}`
+      : vm.available ? 'Voicemeeter installed, not running'
+        : 'no Voicemeeter';
+    setBridgeStatus(`connected · v${info.version} · ${vmText}`, 'ok');
+    log('ok', 'Local app connected', {version: info.version, voicemeeter: vm});
+    $('btn-vm-refresh').hidden = false;
+    if (vm.running) renderVoicemeeter(await state.bridge.voicemeeterState());
+  } catch (e) {
+    setBridgeStatus(describeBridgeError(e), 'warn');
+    log('warn', 'Local app not connected', {code: e.code, error: e.message});
   }
 }
 
@@ -673,6 +732,12 @@ function wireHandlers() {
   $('btn-batch-stop').onclick = () => {
     state.batchAbort = true;
     setStatus('batch-status', 'Stopping after the current measurement…', 'warn');
+  };
+
+  $('btn-bridge-connect').onclick = connectBridge;
+  $('btn-vm-refresh').onclick = async () => {
+    try { renderVoicemeeter(await state.bridge.voicemeeterState()); toast('Voicemeeter refreshed'); }
+    catch (e) { toast(describeBridgeError(e)); }
   };
 
   $('btn-ref').onclick = () => run('ref');

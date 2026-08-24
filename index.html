@@ -121,7 +121,7 @@
   .dd-item.virtual { color: var(--mut); font-style: italic; }
   .dd-item.virtual::after { content: " · virtual"; opacity: .7; font-style: normal; }
 
-  .meter-wrap { display: flex; flex-direction: column; gap: .55rem; margin: .9rem 0 .3rem; }
+  .meter-wrap { display: flex; flex-direction: column; gap: .55rem; margin: .9rem 0 1.4rem; }
   .meter-wrap[hidden] { display: none; }
   .meter-wrap .row { width: 100%; }
   .scope-pair { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; }
@@ -131,10 +131,13 @@
            background: rgba(255,255,255,.02); border: 1px solid var(--card-line); }
   @media (max-width: 520px) { .scope-pair { grid-template-columns: 1fr; } }
   .meter { position: relative; flex: 1; height: 8px; border-radius: 999px; background: rgba(255,255,255,.06); overflow: visible; }
-  .meter-fill { position: absolute; inset: 0; width: 0%; border-radius: 999px;
-                background: linear-gradient(90deg, var(--ok), var(--warn) 78%, var(--bad)); transition: width 70ms linear; }
-  .meter-peak { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fg); left: 0%;
-                transition: left 90ms linear; opacity: .8; }
+  /* No CSS transition on width/left: meter.js already applies time-based
+     ballistics every frame, and a transition on top of that would add a second,
+     uncontrolled smoothing stage and make the reading lag the actual signal. */
+  .meter-fill { position: absolute; inset: 0; width: 0%; border-radius: 999px; background: var(--ok); }
+  .meter-peak { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fg); left: 0%; opacity: .85; }
+  .meter-scale { position: absolute; left: 0; right: 0; top: 11px; display: flex; justify-content: space-between;
+                 font-size: .6rem; color: var(--mut-2); pointer-events: none; font-variant-numeric: tabular-nums; }
   .meter-label { font-size: .78rem; color: var(--mut); white-space: nowrap; min-width: 11rem; text-align: right; }
 
   .advanced { margin: .7rem 0; padding: .8rem; border: 1px dashed var(--card-line); border-radius: 10px; }
@@ -179,6 +182,12 @@
   .modal-title { margin: 0 0 .5rem; font-size: 1rem; }
   .modal-body { margin: 0 0 1.15rem; color: var(--mut); font-size: .88rem; }
   .modal-actions { display: flex; gap: .5rem; justify-content: flex-end; flex-wrap: wrap; }
+  .modal-field { display: flex; align-items: center; gap: .5rem; margin: 0 0 .75rem; }
+  .modal-input { flex: 1; font: inherit; font-size: 16px; padding: .55rem .7rem; border-radius: 10px;
+                 border: 1px solid var(--card-line); background: rgba(255,255,255,.03); color: inherit; }
+  .modal-unit { color: var(--mut); font-size: .85rem; }
+  .modal-error { color: var(--bad); font-size: .8rem; margin: -.4rem 0 .8rem; }
+  .modal-error[hidden] { display: none; }
   .btn.danger { background: var(--bad); color: #1a0505; box-shadow: 0 4px 20px -4px color-mix(in srgb, var(--bad) 55%, transparent); }
 
   .picker { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: .4rem; margin: .3rem 0 .9rem; }
@@ -276,7 +285,12 @@
         </div>
       </div>
       <div class="row">
-        <div class="meter"><div class="meter-fill" id="meter-fill"></div><div class="meter-peak" id="meter-peak"></div></div>
+        <div class="meter" role="meter" aria-label="Input level">
+          <div class="meter-fill" id="meter-fill"></div>
+          <div class="meter-peak" id="meter-peak"></div>
+          <div class="meter-scale"><span>-60</span><span>-40</span><span>-20</span><span>-6</span><span>0</span></div>
+        </div>
+        <span class="badge bad" id="meter-clip" hidden>CLIP</span>
         <span class="meter-label mono" id="meter-label">—</span>
       </div>
     </div>
@@ -324,6 +338,26 @@
       </label>
     </div>
     <p class="status" id="dut-status"></p>
+  </section>
+
+  <section class="card wide" id="card-bridge">
+    <div class="card-head">
+      <h2>Local app <span class="badge">optional</span></h2>
+      <span class="note" id="bridge-status">not connected</span>
+    </div>
+    <p class="hint">The browser cannot use exclusive-mode audio, cannot raise its own thread priority,
+    and cannot talk to Voicemeeter. Running <code class="mono">delayprobe serve</code> on this machine
+    unlocks all three. See <code class="mono">native/README.md</code> for how to start it.</p>
+    <div class="row">
+      <button class="ghost-btn" id="btn-bridge-connect">Connect</button>
+      <button class="ghost-btn small" id="btn-vm-refresh" hidden>Refresh Voicemeeter</button>
+    </div>
+    <div class="table-wrap" id="vm-wrap" hidden>
+      <table>
+        <thead><tr><th>Bus</th><th>Label</th><th>Device</th><th>Delay</th><th></th></tr></thead>
+        <tbody id="vm-buses"></tbody>
+      </table>
+    </div>
   </section>
 
   <section class="card wide" id="card-batch" data-disabled="true">
