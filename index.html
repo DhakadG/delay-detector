@@ -145,6 +145,9 @@
 
   .status { font-size: .85rem; margin: .6rem 0 0; min-height: 1.2em; }
   .status.ok { color: var(--ok); } .status.warn { color: var(--warn); } .status.bad { color: var(--bad); }
+  .pill-inline { display: inline-block; margin-top: .5rem; padding: .25rem .6rem; border-radius: 999px;
+                 border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); color: var(--accent); font-size: .75rem; }
+  .pill-inline[hidden] { display: none; }
   .badge.bad { background: color-mix(in srgb, var(--bad) 20%, transparent); color: var(--bad); }
   tr.bad td { color: var(--bad); }
 
@@ -278,6 +281,7 @@
       </label>
     </div>
     <p class="status" id="ref-status"></p>
+    <p class="note pill-inline" id="ref-active" hidden></p>
   </section>
 
   <section class="card" id="card-dut" data-disabled="true">
@@ -304,6 +308,7 @@
     <div class="card-head">
       <h2>Results</h2>
       <div class="row">
+        <button class="ghost-btn small" id="btn-copy-history">Copy</button>
         <button class="ghost-btn small" id="btn-export">Export CSV</button>
         <button class="ghost-btn small" id="btn-clear-history">Clear history</button>
       </div>

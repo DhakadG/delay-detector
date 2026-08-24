@@ -38,6 +38,52 @@ export function exportLog() {
   return entries.map(fmt).join('\n');
 }
 
+export function logCount() {
+  return entries.length;
+}
+
+/**
+ * Route everything the page can go wrong with into the same timestamped log,
+ * so a bug report is one "Copy" away and nothing fails silently in a console
+ * the user never opens.
+ */
+export function installGlobalHandlers() {
+  window.addEventListener('error', (e) => {
+    log('bad', 'Uncaught error', {
+      message: e.message,
+      source: e.filename ? `${e.filename}:${e.lineno}:${e.colno}` : undefined,
+      stack: e.error?.stack?.split('\n').slice(0, 4).join(' | '),
+    });
+  });
+
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e.reason;
+    log('bad', 'Unhandled promise rejection', {
+      message: r?.message ?? String(r),
+      stack: r?.stack?.split('\n').slice(0, 4).join(' | '),
+    });
+  });
+
+  const origError = console.error.bind(console);
+  console.error = (...args) => {
+    log('bad', 'console.error', {args: args.map((a) => (a instanceof Error ? a.message : String(a)))});
+    origError(...args);
+  };
+
+  const origWarn = console.warn.bind(console);
+  console.warn = (...args) => {
+    log('warn', 'console.warn', {args: args.map(String)});
+    origWarn(...args);
+  };
+
+  document.addEventListener('visibilitychange', () => {
+    // Browsers throttle timers and can suspend audio in background tabs,
+    // which would quietly wreck a measurement in progress.
+    log(document.hidden ? 'warn' : 'info',
+      document.hidden ? 'Tab hidden — do not run a measurement while backgrounded' : 'Tab visible again');
+  });
+}
+
 export function clearLog() {
   entries = [];
   if (target) target.innerHTML = '';

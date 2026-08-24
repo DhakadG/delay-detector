@@ -5,7 +5,7 @@ import {
   watchDeviceChanges, attachLiveMeter,
 } from './capture.js';
 import {enhanceSelect} from './dropdown.js';
-import {initLog, log, exportLog, clearLog} from './log.js';
+import {initLog, log, exportLog, clearLog, installGlobalHandlers} from './log.js';
 import {loadHistory, saveEntry, clearHistory, toCsv} from './store.js';
 
 const $ = (id) => document.getElementById(id);
@@ -14,13 +14,13 @@ const isVirtual = (label) => /voicemeeter|vb-audio|virtual cable/i.test(label ||
 const state = {
   ctx: null, stream: null,
   currentInputId: null, refDeviceId: null, dutDeviceId: null,
-  refMs: null, refDistanceM: null,
+  refMs: null, refDistanceM: null, refDevice: null, refAt: null,
   switchable: canSwitchOutput(),
   // true only once device lists come back with something to switch between —
   // Android/iOS Chrome and Safari never support setSinkId, so this stays
   // false there and the UI falls back to a typed label per measurement.
   canPickOutput: false,
-  meterStop: null,
+  meter: null,
   warnedVirtual: false,
   peakHold: -60, peakHoldT: 0,
 };
@@ -120,7 +120,7 @@ async function initMic(deviceId) {
     const {stream, settings, warnings} = await openMic(deviceId);
 
     if (state.stream) state.stream.getTracks().forEach((t) => t.stop());
-    if (state.meterStop) state.meterStop();
+    if (state.meter) state.meter.stop();
     state.stream = stream;
     state.currentInputId = settings.deviceId || null;
 
@@ -150,7 +150,7 @@ async function initMic(deviceId) {
       autoGainControl: settings.autoGainControl,
     });
 
-    state.meterStop = attachLiveMeter(state.ctx, state.stream, {
+    state.meter = attachLiveMeter(state.ctx, state.stream, {
       onLevel: updateMeter, waveCanvas: $('scope-wave'), stripCanvas: $('scope-strip'),
     });
     $('meter-wrap').hidden = false;
@@ -226,19 +226,62 @@ async function run(which) {
   btn.disabled = true;
 
   try {
-    if (usingSel) {
-      log('info', 'Switching output sink', {to: deviceLabel});
-      await state.ctx.setSinkId(sel.value);
-      await new Promise((r) => setTimeout(r, 800)); // Bluetooth re-negotiation isn't instant
+    const trackSettings = state.stream?.getAudioTracks?.()[0]?.getSettings?.() ?? {};
+    log('info', `--- ${which.toUpperCase()} run begin ---`, {
+      device: deviceLabel,
+      inputDeviceId: trackSettings.deviceId,
+      contextState: state.ctx.state,
+      sampleRate: state.ctx.sampleRate,
+    });
+
+    // The whole differential rests on the input chain being identical across
+    // the reference and every device run. If Windows silently flipped the
+    // default mic (classic when a Bluetooth headset connects), the numbers
+    // stop meaning anything — so check rather than assume.
+    if (state.refInputId && trackSettings.deviceId && trackSettings.deviceId !== state.refInputId) {
+      log('bad', 'Input device changed since the reference run — the differential is invalid', {
+        referenceInput: state.refInputId, nowInput: trackSettings.deviceId,
+      });
+      toast('Microphone changed since the reference — re-measure the reference');
     }
+
+    if (usingSel) {
+      log('info', 'Switching output sink', {to: deviceLabel, deviceId: sel.value});
+      const tSink = performance.now();
+      await state.ctx.setSinkId(sel.value);
+      // Bluetooth re-negotiation is not instant, and the warm-up sweep in the
+      // stimulus covers the rest of the spin-up.
+      await new Promise((r) => setTimeout(r, 900));
+      log('info', 'Sink switched', {
+        tookMs: Math.round(performance.now() - tSink),
+        outputLatencyMs: +((state.ctx.outputLatency ?? 0) * 1000).toFixed(2),
+      });
+    }
+
+    if (state.ctx.state !== 'running') {
+      log('warn', 'AudioContext not running at measurement start — attempting resume', {state: state.ctx.state});
+      await state.ctx.resume();
+    }
+
     setStatus(statusId, 'Measuring — keep the room quiet…');
-    log('info', `Measurement started (${which})`, {device: deviceLabel});
+    state.meter?.mark(which);
     const t0 = performance.now();
-    const r = await measureOnce(state.ctx, state.stream);
+    const r = await measureOnce(state.ctx, state.stream, undefined,
+      (stage, detail) => log(stage === 'align' ? 'warn' : 'info', `Measurement ${stage}`, detail));
     const tookMs = Math.round(performance.now() - t0);
 
+    if (r.droppedFrames) {
+      log('bad', 'Audio thread dropped frames during capture — alignment may be off', {
+        droppedFrames: r.droppedFrames,
+        droppedMs: +(r.droppedFrames / state.ctx.sampleRate * 1000).toFixed(1),
+      });
+    }
+
     if (r.delayMs == null) {
-      log('bad', `Measurement rejected (${which})`, {reason: r.reason, discarded: r.rejected.length, tookMs});
+      log('bad', `Measurement rejected (${which})`, {
+        reason: r.reason, discarded: r.rejected.length,
+        rejectedDetail: r.rejected, tookMs,
+      });
       setStatus(statusId, `Rejected: ${r.reason}. ${r.hint || ''}`, 'bad');
       return;
     }
@@ -248,6 +291,10 @@ async function run(which) {
       qualityDb: +r.qualityDb.toFixed(1), usedRepeats: r.usedRepeats,
       trimmedOutliers: r.trimmedOutliers, discarded: r.rejected.length, tookMs,
     });
+    // Per-repeat values, so a suspicious result can be diagnosed from the log
+    // alone without having to reproduce it.
+    log('info', 'Per-repeat delays (ms)', {delays: r.delays.map((d) => +d.toFixed(2))});
+    if (r.rejected.length) log('warn', 'Repeats rejected before averaging', {rejected: r.rejected});
     if (r.trimmedOutliers) {
       log('warn', `Discarded ${r.trimmedOutliers} repeat(s) that landed far from the rest — likely a reflection or noise burst, not the direct arrival`);
     }
@@ -263,9 +310,19 @@ async function run(which) {
         : ` — spread wider than usual (${r.reason}), treat as approximate`;
 
     if (which === 'ref') {
+      if (state.refMs != null) {
+        log('warn', 'Replacing the previous reference', {
+          previous: {device: state.refDevice, delayMs: +state.refMs.toFixed(2)},
+          now: {device: deviceLabel, delayMs: +r.delayMs.toFixed(2)},
+        });
+      }
       state.refMs = r.delayMs;
+      state.refDevice = deviceLabel;
+      state.refAt = new Date().toISOString();
+      state.refInputId = trackSettings.deviceId ?? null;
       state.refDeviceId = usingSel ? sel.value : null;
       state.refDistanceM = parseFloat($('in-ref-distance').value) || null;
+      updateRefBadge();
       setStatus(statusId,
         `Reference round trip ${r.delayMs.toFixed(1)} ms (spread ±${r.spreadMs.toFixed(1)} ms, ` +
         `peak ${r.qualityDb.toFixed(0)} dB)${caveat}. Now measure your devices.`, severity);
@@ -281,9 +338,18 @@ async function run(which) {
       if (airCorrectionMs) log('info', 'Applied air-propagation correction for unequal mic distance', {airCorrectionMs: +airCorrectionMs.toFixed(2)});
 
       const o = playerOffsets(deltaMs);
+      log('ok', 'Differential computed', {
+        device: deviceLabel,
+        referenceDevice: state.refDevice,
+        referenceMs: +state.refMs.toFixed(2),
+        deviceMs: +r.delayMs.toFixed(2),
+        deltaMs: +deltaMs.toFixed(2),
+        vlc: o.vlc, mpv: o.mpv,
+      });
       saveEntry({
         timestamp: new Date().toISOString(),
         device: deviceLabel, deltaMs, spreadMs: r.spreadMs, confident: r.ok, confidence: severity,
+        reference: state.refDevice, referenceMs: state.refMs, deviceMs: r.delayMs,
         vlc: o.vlc, mpv: o.mpv, plex: o.plex, kodi: o.kodi, ffmpeg: o.ffmpeg,
       });
       renderHistory();
@@ -298,6 +364,15 @@ async function run(which) {
   } finally {
     btn.disabled = false;
   }
+}
+
+/** Shows which reference every delta is currently being measured against. */
+function updateRefBadge() {
+  const el = $('ref-active');
+  if (!el) return;
+  if (state.refMs == null) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = `Active reference: ${state.refDevice} · ${state.refMs.toFixed(1)} ms`;
 }
 
 // --------------------------------------------------------------- results --
@@ -388,6 +463,20 @@ function wireHandlers() {
     log('info', 'Exported results as CSV');
   };
 
+  $('btn-copy-history').onclick = async () => {
+    const history = loadHistory();
+    if (!history.length) { toast('No measurements to copy'); return; }
+    const text = toCsv(history);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(`Copied ${history.length} measurement(s)`);
+      log('info', `Copied ${history.length} measurement(s) to the clipboard`);
+    } catch (e) {
+      log('warn', 'Clipboard copy failed', {error: e.message});
+      toast('Copy failed — use Export CSV instead');
+    }
+  };
+
   $('btn-clear-history').onclick = () => {
     if (!confirm('Clear all saved measurement history? This cannot be undone.')) return;
     clearHistory();
@@ -398,9 +487,19 @@ function wireHandlers() {
 
 async function boot() {
   initLog($('log'));
+  installGlobalHandlers();
   log('info', 'App loaded', {
     userAgent: navigator.userAgent,
     outputSwitchingSupported: state.switchable,
+    engineDefaults: {
+      repeats: DEFAULTS.repeats,
+      sweepMs: DEFAULTS.sweepSec * 1000,
+      gapMs: [DEFAULTS.gapMinSec * 1000, DEFAULTS.gapMaxSec * 1000],
+      maxLagMs: DEFAULTS.maxLagSec * 1000,
+      maxSpreadMs: DEFAULTS.maxSpreadMs,
+    },
+    screen: `${window.innerWidth}x${window.innerHeight}@${window.devicePixelRatio || 1}x`,
+    secureContext: window.isSecureContext,
   });
   wireHandlers();
   renderHistory();

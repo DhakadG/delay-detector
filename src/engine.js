@@ -7,10 +7,13 @@ export const DEFAULTS = {
   f0: 500,           // Hz. Below ~300 Hz earbuds and laptop speakers roll off.
   f1: 8000,          // Hz. Above ~10 kHz lossy BT codecs low-pass hard.
   sweepSec: 0.04,
-  repeats: 8,
-  gapMinSec: 0.15,
-  gapMaxSec: 0.30,
-  maxLagSec: 0.6,    // widest plausible output-path delay
+  repeats: 6,
+  // INVARIANT: gapMinSec MUST exceed maxLagSec + sweepSec. Enforced in
+  // makeStimulus() — see the comment there for what breaks otherwise.
+  gapMinSec: 0.65,
+  gapMaxSec: 0.75,
+  maxLagSec: 0.55,   // widest plausible output-path delay
+  warmup: true,      // throwaway leading sweep, see makeStimulus()
   amplitude: 0.25,   // about -12 dBFS
   minPeakQualityDb: 18,
   maxSpreadMs: 5,   // matches the documented ~5ms error budget; real BT/virtual-device jitter (docs/RESEARCH.md #6.5) rarely stays under 3ms
@@ -40,25 +43,61 @@ export function makeSweep(sampleRate, opts = DEFAULTS) {
  */
 export function makeStimulus(sampleRate, opts = DEFAULTS, rand = Math.random) {
   const o = {...DEFAULTS, ...opts};
+
+  // Every gap MUST be longer than the widest delay we search for, or sweeps
+  // alias onto each other. If gap < delay, sweep N-1's arrival lands inside
+  // sweep N's search window at lag (delay - gap) — EARLIER than sweep N's own
+  // arrival at lag `delay`. pickArrival() then correctly takes the earliest
+  // peak and gets the wrong sweep, every repeat, in perfect agreement. The
+  // result is a confident answer with a near-zero spread that is simply
+  // false (a 10 ms "round trip" through HDMI, an output measuring *ahead* of
+  // a wired reference), and since gaps are randomised it lands somewhere new
+  // on every run. Thrown rather than documented because the failure mode
+  // looks exactly like success.
+  const minGapNeeded = o.maxLagSec + o.sweepSec;
+  if (o.gapMinSec <= minGapNeeded) {
+    throw new Error(
+      `makeStimulus: gapMinSec (${o.gapMinSec}s) must exceed maxLagSec + sweepSec ` +
+      `(${minGapNeeded.toFixed(3)}s), otherwise consecutive sweeps alias onto each other`);
+  }
+
   const sweep = makeSweep(sampleRate, o);
+  const randomGap = () => Math.round(
+    (o.gapMinSec + rand() * (o.gapMaxSec - o.gapMinSec)) * sampleRate);
+
   const offsets = [];
   const chunks = [];
   let cursor = 0;
+
+  // A throwaway leading sweep, deliberately absent from `offsets` so it is
+  // never measured. Bluetooth links and some OS mixers power the output path
+  // down when idle and take a few hundred ms to spin back up, mangling
+  // whichever sweep happens to go first. Burning one sweep to wake the path
+  // is cheaper than losing a real repeat to it.
+  if (o.warmup) {
+    chunks.push(sweep);
+    cursor += sweep.length;
+    const g = randomGap();
+    chunks.push(new Float32Array(g));
+    cursor += g;
+  }
+
   for (let i = 0; i < o.repeats; i++) {
     offsets.push(cursor);
     chunks.push(sweep);
     cursor += sweep.length;
-    const gap = Math.round(
-      (o.gapMinSec + rand() * (o.gapMaxSec - o.gapMinSec)) * sampleRate);
-    chunks.push(new Float32Array(gap));
-    cursor += gap;
+    // The trailing gap after the final sweep doubles as the recording tail:
+    // it exceeds maxLagSec by the invariant above, so the last arrival is
+    // always inside the capture.
+    const g = randomGap();
+    chunks.push(new Float32Array(g));
+    cursor += g;
   }
-  // tail long enough for the last sweep to land inside the recording
-  cursor += Math.round(o.maxLagSec * sampleRate);
+
   const signal = new Float32Array(cursor);
   let p = 0;
   for (const c of chunks) { signal.set(c, p); p += c.length; }
-  return {signal, offsets, sweep, sampleRate};
+  return {signal, offsets, sweep, sampleRate, durationSec: cursor / sampleRate};
 }
 
 /**

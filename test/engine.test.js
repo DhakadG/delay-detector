@@ -66,6 +66,39 @@ check('picks the direct arrival, not a louder reflection', () => {
   assert.ok(Math.abs(r.delayMs - trueMs) < 1.0, `got ${r.delayMs}, want ${trueMs} (took the reflection?)`);
 });
 
+check('recovers a delay longer than the old inter-sweep gap (aliasing regression)', () => {
+  // Regression for the bug that made a Bluetooth speaker read as 9.89ms
+  // round trip with a 0.02ms spread. Any delay in this range used to be
+  // reported as (delay - gap) because the previous sweep's arrival sat
+  // earlier in the window than the current sweep's own.
+  for (const trueMs of [180, 240, 300, 420]) {
+    const rand = lcg(11);
+    const st = makeStimulus(SR, {}, rand);
+    const rec = simulate(st, {
+      delaySamples: Math.round((trueMs / 1000) * SR), gain: 0.4, noise: 0.002, rand,
+    });
+    const r = measure(rec, st);
+    assert.equal(r.ok, true, `${trueMs}ms rejected: ${r.reason}`);
+    assert.ok(Math.abs(r.delayMs - trueMs) < 1.0,
+      `got ${r.delayMs?.toFixed(2)}, want ${trueMs} — aliased onto a neighbouring sweep?`);
+  }
+});
+
+check('refuses to build a stimulus whose gaps allow aliasing', () => {
+  assert.throws(
+    () => makeStimulus(SR, {gapMinSec: 0.15, gapMaxSec: 0.3, maxLagSec: 0.6}),
+    /alias/i,
+    'a gap shorter than the search window must be rejected, not silently measured');
+});
+
+check('the warm-up sweep is emitted but never measured', () => {
+  const withWarm = makeStimulus(SR, {warmup: true}, lcg(12));
+  const without = makeStimulus(SR, {warmup: false}, lcg(12));
+  assert.equal(withWarm.offsets.length, without.offsets.length);
+  assert.ok(withWarm.signal.length > without.signal.length, 'warm-up should lengthen the signal');
+  assert.ok(withWarm.offsets[0] > 0, 'first measured sweep must sit after the warm-up');
+});
+
 check('trims a repeat that lands far from the pack', () => {
   const rand = lcg(4);
   const st = makeStimulus(SR, {}, rand);

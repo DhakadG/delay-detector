@@ -12,3 +12,4 @@ wrangler.jsonc
 .assetsignore
 .gitignore
 .wrangler
+eslint.config.mjs
