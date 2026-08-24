@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delay Detector — measure your audio output latency</title>
+<style>
+  :root { color-scheme: light dark; --fg: #111; --bg: #fff; --mut: #666; --line: #ddd; --ok: #0a7; --bad: #c33; --warn: #b70; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #eee; --bg: #14161a; --mut: #999; --line: #333; } }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.55 system-ui, sans-serif; color: var(--fg); background: var(--bg);
+         max-width: 720px; margin: 0 auto; padding: 2rem 1rem 5rem; }
+  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1rem; margin: 2rem 0 .5rem; }
+  p.sub { color: var(--mut); margin: 0 0 2rem; }
+  button { font: inherit; padding: .5rem .9rem; border: 1px solid var(--line);
+           border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+  select { font: inherit; padding: .4rem; max-width: 100%; background: transparent; color: inherit;
+           border: 1px solid var(--line); border-radius: 6px; }
+  .step { border-top: 1px solid var(--line); padding-top: 1rem; margin-top: 1.5rem; }
+  .step[hidden] { display: none; }
+  .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+  .note { color: var(--mut); font-size: .85rem; }
+  .bad { color: var(--bad); } .ok { color: var(--ok); } .warn { color: var(--warn); }
+  table { border-collapse: collapse; width: 100%; margin-top: .75rem; }
+  th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--line); font-size: .9rem; }
+  code { background: color-mix(in srgb, currentColor 10%, transparent); padding: .1rem .3rem; border-radius: 4px; }
+  #log { white-space: pre-wrap; font-size: .85rem; color: var(--mut); margin-top: 1rem; }
+  meter { width: 12rem; }
+</style>
+</head>
+<body>
+
+<h1>Delay Detector</h1>
+<p class="sub">Measures how far behind your Bluetooth or wired output really is, by
+playing a sweep and listening to it come back. Gives you the exact number to
+paste into VLC, mpv, or Plex.</p>
+
+<div class="step" id="step-mic">
+  <h2>1 · Microphone</h2>
+  <p class="note">Use your laptop's built-in mic, and keep it selected for the whole
+  session. If you let it switch to a Bluetooth headset mic, the link drops into
+  hands-free mode and every number becomes meaningless.</p>
+  <div class="row">
+    <button class="primary" id="btn-mic">Enable microphone</button>
+    <select id="sel-input" hidden></select>
+  </div>
+  <p class="note" id="mic-status"></p>
+</div>
+
+<div class="step" id="step-level" hidden>
+  <h2>2 · Level check</h2>
+  <div class="row">
+    <button id="btn-level">Check level</button>
+    <meter id="meter" min="-60" max="0" low="-40" high="-6" optimum="-20" value="-60"></meter>
+    <span class="note" id="level-status"></span>
+  </div>
+</div>
+
+<div class="step" id="step-ref" hidden>
+  <h2>3 · Reference</h2>
+  <p class="note">Play through your <strong>built-in or wired speaker</strong> and
+  measure it. Everything after this is compared against it, which is what cancels
+  out the microphone's own latency.</p>
+  <div class="row">
+    <select id="sel-ref" hidden></select>
+    <button class="primary" id="btn-ref">Measure reference</button>
+  </div>
+  <p class="note" id="ref-status"></p>
+</div>
+
+<div class="step" id="step-dut" hidden>
+  <h2>4 · Devices</h2>
+  <p class="note" id="dut-help"></p>
+  <div class="row">
+    <select id="sel-dut" hidden></select>
+    <button class="primary" id="btn-dut">Measure this output</button>
+  </div>
+  <p class="note" id="dut-status"></p>
+</div>
+
+<div class="step" id="step-results" hidden>
+  <h2>Results</h2>
+  <table id="results">
+    <thead><tr><th>Device</th><th>Extra delay</th><th>Spread</th><th>VLC</th><th>mpv</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <p class="note">VLC: Tools → Preferences → Audio → Audio track synchronization.
+  Positive VLC values delay the audio; negative values advance it.</p>
+</div>
+
+<div id="log"></div>
+
+<script type="module" src="./src/app.js"></script>
+</body>
+</html>

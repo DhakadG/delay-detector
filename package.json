@@ -1,0 +1,11 @@
+{
+  "name": "delay-detector",
+  "version": "0.1.0",
+  "description": "Measure real audio output latency in the browser and get a player sync offset",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node test/engine.test.js",
+    "start": "npx serve ."
+  }
+}
