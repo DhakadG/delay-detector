@@ -46,13 +46,60 @@ export function canSwitchOutput() {
     typeof AudioContext.prototype.setSinkId === 'function';
 }
 
-/** Peak and RMS of a short capture, for the pre-flight level check. */
-export async function levelCheck(ctx, stream, seconds = 0.5) {
-  const rec = await record(ctx, stream, seconds);
-  let peak = 0, sum = 0;
-  for (const v of rec.samples) { const a = Math.abs(v); if (a > peak) peak = a; sum += v * v; }
-  const rms = Math.sqrt(sum / (rec.samples.length || 1));
-  return {peak, rms, peakDb: 20 * Math.log10(peak || 1e-9), rmsDb: 20 * Math.log10(rms || 1e-9)};
+/**
+ * 'granted' | 'denied' | 'prompt' | 'unsupported'.
+ * Firefox doesn't implement the 'microphone' permission name and throws —
+ * treat that the same as "can't tell", which means falling back to asking
+ * for an explicit click rather than firing getUserMedia unprompted.
+ */
+export async function micPermissionState() {
+  if (!navigator.permissions?.query) return 'unsupported';
+  try {
+    const status = await navigator.permissions.query({name: 'microphone'});
+    return status.state;
+  } catch {
+    return 'unsupported';
+  }
+}
+
+/** Fires on any input/output plug/unplug, including Bluetooth connect/disconnect. */
+export function watchDeviceChanges(cb) {
+  navigator.mediaDevices.addEventListener('devicechange', cb);
+  return () => navigator.mediaDevices.removeEventListener('devicechange', cb);
+}
+
+/**
+ * Continuous input meter, independent of the recorder worklet, so it can run
+ * at all times without competing with a measurement. Returns a stop() that
+ * tears down the analyser and cancels the animation loop.
+ */
+export function attachLiveMeter(ctx, stream, onLevel) {
+  const src = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  analyser.smoothingTimeConstant = 0.65;
+  src.connect(analyser);
+  const buf = new Float32Array(analyser.fftSize);
+
+  let raf = null;
+  const tick = () => {
+    analyser.getFloatTimeDomainData(buf);
+    let peak = 0, sum = 0;
+    for (const v of buf) { const a = Math.abs(v); if (a > peak) peak = a; sum += v * v; }
+    const rms = Math.sqrt(sum / buf.length);
+    onLevel({
+      peakDb: 20 * Math.log10(peak || 1e-9),
+      rmsDb: 20 * Math.log10(rms || 1e-9),
+    });
+    raf = requestAnimationFrame(tick);
+  };
+  raf = requestAnimationFrame(tick);
+
+  return () => {
+    if (raf) cancelAnimationFrame(raf);
+    src.disconnect();
+    analyser.disconnect();
+  };
 }
 
 let workletReady = null;

@@ -1,0 +1,14 @@
+{
+  "name": "Delay Detector",
+  "short_name": "DelayDetector",
+  "description": "Measure real acoustic audio output latency and get the exact A/V sync offset for your player.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#0a0c10",
+  "theme_color": "#0a0c10",
+  "icons": [
+    {"src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"},
+    {"src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable"}
+  ]
+}
