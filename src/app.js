@@ -3,6 +3,9 @@ import {differential, playerOffsets} from './engine.js';
 import {
   openMic, listDevices, canSwitchOutput, levelCheck, measureOnce, inputFingerprint,
 } from './capture.js';
+import {enhanceSelect} from './dropdown.js';
+
+const isVirtual = (label) => /voicemeeter|vb-audio|virtual cable/i.test(label || '');
 
 const $ = (id) => document.getElementById(id);
 const log = (msg) => { $('log').textContent += msg + '\n'; };
@@ -27,6 +30,7 @@ $('btn-mic').onclick = async () => {
     const {inputs, outputs} = await listDevices();
     fill($('sel-input'), inputs, settings.deviceId);
     $('sel-input').hidden = false;
+    warnIfVirtual([...inputs, ...outputs]);
     $('sel-input').onchange = async () => {
       const {stream: s, settings: st} = await openMic($('sel-input').value);
       state.stream.getTracks().forEach((t) => t.stop());
@@ -87,24 +91,32 @@ async function run(which) {
     setStatus(statusId, 'measuring — keep the room quiet…');
     const r = await measureOnce(state.ctx, state.stream);
 
-    if (!r.ok) {
+    // r.delayMs is missing only when fewer than 3 repeats produced any usable
+    // peak at all — that is the one case with nothing worth showing.
+    if (r.delayMs == null) {
       setStatus(statusId, `Rejected: ${r.reason}. ${r.hint || ''}`, 'bad');
       log(`[${which}] rejected — ${r.reason}; ${r.rejected.length} repeats discarded`);
       return;
     }
 
+    // r.ok false but delayMs present means the spread across repeats was
+    // wider than the trust threshold — still a real number, just noisier
+    // than usual (common with Bluetooth or a Voicemeeter-routed device).
+    const confidence = r.ok ? 'ok' : 'warn';
+    const caveat = r.ok ? '' : ` — spread wider than usual (${r.reason}), treat as approximate`;
+
     if (which === 'ref') {
       state.refMs = r.delayMs;
       setStatus(statusId,
         `Reference round trip ${r.delayMs.toFixed(1)} ms (spread ±${r.spreadMs.toFixed(1)} ms, ` +
-        `peak ${r.qualityDb.toFixed(0)} dB). Now measure your devices.`, 'ok');
+        `peak ${r.qualityDb.toFixed(0)} dB)${caveat}. Now measure your devices.`, confidence);
     } else {
       if (state.refMs == null) { setStatus(statusId, 'Measure the reference first.', 'bad'); return; }
       const {deltaMs} = differential(state.refMs, r.delayMs);
-      addResult(sel.hidden ? 'Current system output' : label(sel), deltaMs, r.spreadMs);
+      addResult(sel.hidden ? 'Current system output' : label(sel), deltaMs, r.spreadMs, r.ok);
       setStatus(statusId,
         `${playerOffsets(deltaMs).summary} (round trip ${r.delayMs.toFixed(1)} ms, ` +
-        `spread ±${r.spreadMs.toFixed(1)} ms)`, 'ok');
+        `spread ±${r.spreadMs.toFixed(1)} ms)${caveat}`, confidence);
       show('step-results');
     }
   } catch (e) {
@@ -114,11 +126,12 @@ async function run(which) {
   }
 }
 
-function addResult(name, deltaMs, spreadMs) {
+function addResult(name, deltaMs, spreadMs, confident) {
   const o = playerOffsets(deltaMs);
   const tr = document.createElement('tr');
+  if (!confident) tr.className = 'warn';
   tr.innerHTML =
-    `<td>${escapeHtml(name)}</td>` +
+    `<td>${escapeHtml(name)}${confident ? '' : ' <span class="note">(approx)</span>'}</td>` +
     `<td>${deltaMs >= 0 ? '+' : ''}${deltaMs.toFixed(0)} ms</td>` +
     `<td>±${spreadMs.toFixed(1)} ms</td>` +
     `<td><code>${o.vlc}</code></td>` +
@@ -131,10 +144,22 @@ function fill(sel, devices, selectedId) {
   for (const d of devices) {
     const opt = document.createElement('option');
     opt.value = d.deviceId;
-    opt.textContent = d.label || `${d.kind} ${d.deviceId.slice(0, 8)}`;
+    const name = d.label || `${d.kind} ${d.deviceId.slice(0, 8)}`;
+    opt.textContent = isVirtual(name) ? `${name} · virtual` : name;
+    if (isVirtual(name)) opt.dataset.virtual = '1';
     if (d.deviceId === selectedId) opt.selected = true;
     sel.appendChild(opt);
   }
+  enhanceSelect(sel);
+}
+
+function warnIfVirtual(devices) {
+  if (!devices.some((d) => isVirtual(d.label))) return;
+  log('Voicemeeter (or another virtual audio cable) is installed. Its virtual devices ' +
+    'are marked "· virtual" below. They sit in the audio path and add their own buffering, ' +
+    'which this app cannot see through — for a real reading, measure your reference and the ' +
+    'device under test on the same routing you actually use for playback (either both through ' +
+    'Voicemeeter, or both bypassing it), not one of each.');
 }
 
 const label = (sel) => sel.options[sel.selectedIndex]?.textContent || '';

@@ -17,18 +17,37 @@
            border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
   button:disabled { opacity: .4; cursor: default; }
   button.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
-  select { font: inherit; padding: .4rem; max-width: 100%; background: transparent; color: inherit;
-           border: 1px solid var(--line); border-radius: 6px; }
+  select.dd-native { display: none; }
   .step { border-top: 1px solid var(--line); padding-top: 1rem; margin-top: 1.5rem; }
   .step[hidden] { display: none; }
   .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
   .note { color: var(--mut); font-size: .85rem; }
   .bad { color: var(--bad); } .ok { color: var(--ok); } .warn { color: var(--warn); }
+  tr.warn td { color: var(--warn); }
   table { border-collapse: collapse; width: 100%; margin-top: .75rem; }
   th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--line); font-size: .9rem; }
   code { background: color-mix(in srgb, currentColor 10%, transparent); padding: .1rem .3rem; border-radius: 4px; }
   #log { white-space: pre-wrap; font-size: .85rem; color: var(--mut); margin-top: 1rem; }
   meter { width: 12rem; }
+
+  /* custom dropdown — replaces the native <select> popup, which is OS chrome
+     and cannot be restyled consistently across browsers */
+  .dd { position: relative; display: inline-block; min-width: 14rem; max-width: 100%; }
+  .dd[hidden] { display: none; }
+  .dd-btn { font: inherit; width: 100%; text-align: left; padding: .5rem .9rem;
+            border: 1px solid var(--line); border-radius: 6px; background: transparent;
+            color: inherit; cursor: pointer; display: flex; justify-content: space-between; gap: .5rem; }
+  .dd-btn:disabled { opacity: .4; cursor: default; }
+  .dd-btn::after { content: "▾"; opacity: .6; flex: none; }
+  .dd-list { position: absolute; z-index: 10; top: calc(100% + 4px); left: 0; right: 0;
+             max-height: 16rem; overflow-y: auto; background: var(--bg); color: inherit;
+             border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.25);
+             padding: .25rem; }
+  .dd-list[hidden] { display: none; }
+  .dd-item { padding: .45rem .6rem; border-radius: 4px; cursor: pointer; white-space: nowrap;
+             overflow: hidden; text-overflow: ellipsis; }
+  .dd-item:hover, .dd-item.sel { background: color-mix(in srgb, currentColor 12%, transparent); }
+  .dd-item.virtual { color: var(--mut); font-style: italic; }
 </style>
 </head>
 <body>

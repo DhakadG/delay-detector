@@ -13,7 +13,7 @@ export const DEFAULTS = {
   maxLagSec: 0.6,    // widest plausible output-path delay
   amplitude: 0.25,   // about -12 dBFS
   minPeakQualityDb: 18,
-  maxSpreadMs: 3,
+  maxSpreadMs: 5,   // matches the documented ~5ms error budget; real BT/virtual-device jitter (docs/RESEARCH.md #6.5) rarely stays under 3ms
   firstPeakFrac: 0.7,
 };
 
