@@ -127,6 +127,49 @@ check('trims a repeat that lands far from the pack', () => {
   assert.ok(r.trimmedOutliers >= 1, 'expected the 400ms outlier repeat to be trimmed');
 });
 
+check('separates clock drift from jitter', () => {
+  // Modelled on a real Bluetooth capture whose per-repeat delays fell
+  // monotonically 262 -> 244 ms across the run. Averaging that ramp gives a
+  // number describing no instant in particular, and its raw spread reports
+  // the drift rather than the measurement noise.
+  const rand = lcg(21);
+  const st = makeStimulus(SR, {}, rand);
+  const startMs = 262, driftMsPerSec = -5.2;
+  const rec = new Float32Array(st.signal.length);
+  st.offsets.forEach((off) => {
+    const tSec = off / SR;
+    const delayMs = startMs + driftMsPerSec * tSec;
+    const d = Math.round((delayMs / 1000) * SR);
+    for (let k = 0; k < st.sweep.length; k++) {
+      const j = off + d + k;
+      if (j < rec.length) rec[j] += 0.4 * st.sweep[k];
+    }
+  });
+  for (let i = 0; i < rec.length; i++) rec[i] += 0.002 * (rand() * 2 - 1);
+
+  const r = measure(rec, st);
+  assert.ok(r.drifting, 'a 5.2 ms/s ramp must be flagged as drift');
+  assert.ok(Math.abs(r.driftMsPerSec - driftMsPerSec) < 0.6,
+    `drift ${r.driftMsPerSec?.toFixed(2)} ms/s, want ~${driftMsPerSec}`);
+  // Jitter is scatter about the trend, so it must stay small even though the
+  // raw spread is large.
+  assert.ok(r.jitterMs < 2, `jitter ${r.jitterMs?.toFixed(2)} ms should be small`);
+  assert.ok(r.spreadMs > r.jitterMs, 'raw spread should exceed detrended jitter here');
+  // settledMs tracks where the trend ended, not the middle of the ramp.
+  const lastT = st.offsets[st.offsets.length - 1] / SR;
+  assert.ok(Math.abs(r.settledMs - (startMs + driftMsPerSec * lastT)) < 1.5,
+    `settled ${r.settledMs?.toFixed(2)} should match the end of the ramp`);
+});
+
+check('a steady device reports no drift', () => {
+  const rand = lcg(22);
+  const st = makeStimulus(SR, {}, rand);
+  const rec = simulate(st, {delaySamples: Math.round(0.08 * SR), gain: 0.4, noise: 0.002, rand});
+  const r = measure(rec, st);
+  assert.equal(r.drifting, false, `steady signal flagged as drifting (${r.driftMsPerSec} ms/s)`);
+  assert.equal(r.ok, true);
+});
+
 check('rejects a capture that is mostly noise', () => {
   const rand = lcg(3);
   const st = makeStimulus(SR, {}, rand);

@@ -6,11 +6,12 @@
 // mode. An earlier cache-first version meant every deploy was invisible until
 // the second reload, and users measured against old DSP without knowing.
 // Cache is the fallback for genuinely being offline, nothing more.
-const CACHE = 'delay-detector-v5';
+const CACHE = 'delay-detector-v6';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest', './icon.svg',
   './src/app.js', './src/engine.js', './src/capture.js', './src/dropdown.js',
   './src/log.js', './src/store.js', './src/version.js', './src/recorder-worklet.js',
+  './src/batch.js', './src/dialog.js',
 ];
 
 self.addEventListener('install', (e) => {

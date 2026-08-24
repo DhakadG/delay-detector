@@ -16,7 +16,8 @@ export const DEFAULTS = {
   warmup: true,      // throwaway leading sweep, see makeStimulus()
   amplitude: 0.25,   // about -12 dBFS
   minPeakQualityDb: 18,
-  maxSpreadMs: 5,   // matches the documented ~5ms error budget; real BT/virtual-device jitter (docs/RESEARCH.md #6.5) rarely stays under 3ms
+  maxSpreadMs: 5,       // jitter about the trend; matches the ~5ms error budget in docs/RESEARCH.md
+  maxDriftMsPerSec: 2,  // beyond this the device clock has not settled
   firstPeakFrac: 0.7,
 };
 
@@ -54,6 +55,7 @@ export function makeStimulus(sampleRate, opts = DEFAULTS, rand = Math.random) {
   // a wired reference), and since gaps are randomised it lands somewhere new
   // on every run. Thrown rather than documented because the failure mode
   // looks exactly like success.
+  //
   // An inverted range makes randomGap() produce negative gaps, which would
   // silently overlap sweeps rather than separate them.
   if (o.gapMaxSec < o.gapMinSec) {
@@ -202,6 +204,18 @@ export function mad(xs) {
   return median(xs.map((x) => Math.abs(x - m)));
 }
 
+/** Ordinary least-squares fit of ys against xs. */
+export function linearFit(xs, ys) {
+  const n = xs.length;
+  if (n < 2) return {slope: 0, intercept: ys[0] ?? 0};
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (let i = 0; i < n; i++) { sx += xs[i]; sy += ys[i]; sxx += xs[i] * xs[i]; sxy += xs[i] * ys[i]; }
+  const det = n * sxx - sx * sx;
+  if (det === 0) return {slope: 0, intercept: sy / n};
+  const slope = (n * sxy - sx * sy) / det;
+  return {slope, intercept: (sy - slope * sx) / n};
+}
+
 /**
  * One measurement run. `rec` is the microphone capture, aligned so sample 0
  * corresponds to sample 0 of the stimulus that was played.
@@ -221,7 +235,11 @@ export function measure(rec, stimulus, opts = DEFAULTS) {
       rejected.push({offset: off, reason: 'low peak quality', qualityDb: hit.qualityDb});
       continue;
     }
-    hits.push({delayMs: ((hit.index - off) / sampleRate) * 1000, qualityDb: hit.qualityDb});
+    hits.push({
+      tSec: off / sampleRate,                              // when this sweep was emitted
+      delayMs: ((hit.index - off) / sampleRate) * 1000,
+      qualityDb: hit.qualityDb,
+    });
   }
 
   if (hits.length < 3) {
@@ -231,25 +249,60 @@ export function measure(rec, stimulus, opts = DEFAULTS) {
     };
   }
 
-  // A repeat can individually pass the peak-quality bar and still have
-  // locked onto a reflection or a stray noise burst instead of the direct
-  // arrival — that shows up as one reading far from the rest, not as low
-  // quality. Trim relative to the untrimmed median, then recompute from
-  // what's left, so one bad repeat in eight can't swing the reported delay.
-  const preTrimMedian = median(hits.map((h) => h.delayMs));
-  const outlierBoundMs = Math.max(8, o.maxSpreadMs * 3);
-  const kept = hits.filter((h) => Math.abs(h.delayMs - preTrimMedian) <= outlierBoundMs);
-  const use = kept.length >= 3 ? kept : hits; // never trim below the usability floor
-  const trimmedOutliers = hits.length - use.length;
+  // Coarse pass: drop gross outliers (a reflection or noise burst that still
+  // cleared the quality bar) relative to the raw median, before any fitting,
+  // so one wild value cannot drag the trend line with it.
+  const rawMedian = median(hits.map((h) => h.delayMs));
+  const coarseBound = Math.max(8, o.maxSpreadMs * 3);
+  let kept = hits.filter((h) => Math.abs(h.delayMs - rawMedian) <= coarseBound);
+  if (kept.length < 3) kept = hits;
 
-  const delays = use.map((h) => h.delayMs);
-  const delayMs = median(delays);
+  // Latency is not necessarily constant across a measurement. A Bluetooth
+  // sink runs on its own crystal and resamples to match; for seconds after a
+  // stream starts its buffer is still converging, so the delay ramps
+  // monotonically. Averaging that ramp yields a number that describes no
+  // instant in particular, and its spread reports the drift rather than the
+  // measurement noise. Fit the trend explicitly instead: the slope is the
+  // drift, and the scatter *about* the line is the real jitter.
+  let fit = linearFit(kept.map((h) => h.tSec), kept.map((h) => h.delayMs));
+  const residual = (h) => h.delayMs - (fit.intercept + fit.slope * h.tSec);
+
+  // Fine pass: trim against the fitted line, so a genuinely drifting series
+  // is not mistaken for a series full of outliers.
+  const resMad = mad(kept.map(residual));
+  const fineBound = Math.max(3, resMad * 3);
+  const kept2 = kept.filter((h) => Math.abs(residual(h)) <= fineBound);
+  if (kept2.length >= 3) { kept = kept2; fit = linearFit(kept.map((h) => h.tSec), kept.map((h) => h.delayMs)); }
+
+  const delays = kept.map((h) => h.delayMs);
+  const trimmedOutliers = hits.length - kept.length;
+
+  const driftMsPerSec = fit.slope;
+  const spanSec = kept[kept.length - 1].tSec - kept[0].tSec;
+  const driftTotalMs = driftMsPerSec * spanSec;
+  const drifting = Math.abs(driftMsPerSec) > o.maxDriftMsPerSec;
+
+  // Jitter is the scatter about the trend — the honest measurement noise.
+  const jitterMs = mad(kept.map(residual));
+  // Raw spread, kept for continuity, but it conflates drift with noise.
   const spreadMs = mad(delays);
-  const ok = spreadMs <= o.maxSpreadMs;
+  // With a drifting device the most useful single value is where the trend
+  // has reached by the end, not the mean of where it has been.
+  const settledMs = fit.intercept + fit.slope * kept[kept.length - 1].tSec;
+
+  const ok = jitterMs <= o.maxSpreadMs && !drifting;
+  const reason = jitterMs > o.maxSpreadMs
+    ? 'inconsistent repeats — unstable link, reflections, or the mic moved'
+    : drifting
+      ? `latency drifted ${driftTotalMs >= 0 ? '+' : ''}${driftTotalMs.toFixed(1)} ms across the run — the device clock has not settled`
+      : null;
+
   return {
-    ok, delayMs, spreadMs, usedRepeats: delays.length, trimmedOutliers,
-    qualityDb: median(use.map((h) => h.qualityDb)), delays, rejected,
-    reason: ok ? null : 'inconsistent repeats — unstable link, reflections, or the mic moved',
+    ok, delayMs: median(delays), settledMs, spreadMs, jitterMs,
+    driftMsPerSec, driftTotalMs, drifting,
+    usedRepeats: delays.length, trimmedOutliers,
+    qualityDb: median(kept.map((h) => h.qualityDb)),
+    delays, rejected, reason,
   };
 }
 

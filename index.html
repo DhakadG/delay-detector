@@ -172,6 +172,27 @@
   .log-line { white-space: pre-wrap; word-break: break-word; }
   .log-info { color: var(--mut); } .log-ok { color: var(--ok); } .log-warn { color: var(--warn); } .log-bad { color: var(--bad); }
 
+  dialog.modal { border: none; padding: 0; background: transparent; color: inherit; max-width: min(92vw, 26rem); }
+  dialog.modal::backdrop { background: rgba(4,6,10,.72); backdrop-filter: blur(3px); }
+  .modal-inner { background: #14171d; border: 1px solid var(--card-line); border-radius: 14px; padding: 1.25rem 1.35rem;
+                 box-shadow: 0 24px 60px -12px rgba(0,0,0,.7); }
+  .modal-title { margin: 0 0 .5rem; font-size: 1rem; }
+  .modal-body { margin: 0 0 1.15rem; color: var(--mut); font-size: .88rem; }
+  .modal-actions { display: flex; gap: .5rem; justify-content: flex-end; flex-wrap: wrap; }
+  .btn.danger { background: var(--bad); color: #1a0505; box-shadow: 0 4px 20px -4px color-mix(in srgb, var(--bad) 55%, transparent); }
+
+  .picker { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: .4rem; margin: .3rem 0 .9rem; }
+  .pick { display: flex; align-items: center; gap: .55rem; padding: .5rem .7rem; border: 1px solid var(--card-line);
+          border-radius: 10px; cursor: pointer; font-size: .85rem; background: rgba(255,255,255,.02); min-height: 44px; }
+  .pick:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--card-line)); }
+  .pick input { accent-color: var(--accent); width: 17px; height: 17px; flex: none; }
+  .pick span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pick.virtual span { color: var(--mut); font-style: italic; }
+  .subhead { font-size: .72rem; color: var(--mut-2); text-transform: uppercase; letter-spacing: .04em; margin: .9rem 0 .1rem; }
+
+  .progress { height: 6px; border-radius: 999px; background: rgba(255,255,255,.07); overflow: hidden; margin: .8rem 0 .4rem; }
+  .progress > div { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s; }
+
   .toast-stack { position: fixed; bottom: 1.2rem; right: 1.2rem; z-index: 40; display: flex; flex-direction: column; gap: .5rem; }
   .toast { background: #14171d; border: 1px solid var(--card-line); border-radius: 10px; padding: .6rem .9rem;
            font-size: .82rem; box-shadow: 0 10px 30px -8px rgba(0,0,0,.5); animation: toast-in .2s ease-out; }
@@ -303,6 +324,44 @@
       </label>
     </div>
     <p class="status" id="dut-status"></p>
+  </section>
+
+  <section class="card wide" id="card-batch" data-disabled="true">
+    <div class="card-head">
+      <h2>Batch run</h2>
+      <span class="note" id="batch-estimate"></span>
+    </div>
+    <p class="hint">Measures every reference against every device, several times, interleaved.
+    The reference is re-measured at the start of each round rather than once up front — devices
+    drift, so a reference from ten measurements ago is not the same reference.</p>
+
+    <p class="subhead">References</p>
+    <div class="picker" id="batch-refs"></div>
+
+    <p class="subhead">Devices to test</p>
+    <div class="picker" id="batch-duts"></div>
+
+    <div class="row">
+      <div class="field">
+        <label for="batch-rounds">Rounds</label>
+        <select id="batch-rounds"></select>
+      </div>
+      <label class="pick" style="max-width:16rem">
+        <input type="checkbox" id="batch-self"><span>Include self-checks (should read ~0 ms)</span>
+      </label>
+      <button class="btn primary" id="btn-batch-start">Start batch</button>
+      <button class="ghost-btn" id="btn-batch-stop" hidden>Stop</button>
+    </div>
+
+    <div class="progress" id="batch-progress" hidden><div></div></div>
+    <p class="status" id="batch-status"></p>
+
+    <div class="table-wrap" id="batch-results-wrap" hidden>
+      <table>
+        <thead><tr><th>Reference → Device</th><th>Median</th><th>Range</th><th>Runs</th><th>Drift</th><th>VLC</th></tr></thead>
+        <tbody id="batch-results-body"></tbody>
+      </table>
+    </div>
   </section>
 
   <section class="card wide" id="card-results">
