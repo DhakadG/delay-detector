@@ -54,6 +54,12 @@ export function makeStimulus(sampleRate, opts = DEFAULTS, rand = Math.random) {
   // a wired reference), and since gaps are randomised it lands somewhere new
   // on every run. Thrown rather than documented because the failure mode
   // looks exactly like success.
+  // An inverted range makes randomGap() produce negative gaps, which would
+  // silently overlap sweeps rather than separate them.
+  if (o.gapMaxSec < o.gapMinSec) {
+    throw new Error(
+      `makeStimulus: gapMaxSec (${o.gapMaxSec}s) must be at least gapMinSec (${o.gapMinSec}s)`);
+  }
   const minGapNeeded = o.maxLagSec + o.sweepSec;
   if (o.gapMinSec <= minGapNeeded) {
     throw new Error(

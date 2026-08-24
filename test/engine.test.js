@@ -91,6 +91,13 @@ check('refuses to build a stimulus whose gaps allow aliasing', () => {
     'a gap shorter than the search window must be rejected, not silently measured');
 });
 
+check('rejects an inverted gap range', () => {
+  assert.throws(
+    () => makeStimulus(SR, {gapMinSec: 0.75, gapMaxSec: 0.65}),
+    /gapMaxSec/,
+    'an inverted range would generate negative gaps and overlap sweeps');
+});
+
 check('the warm-up sweep is emitted but never measured', () => {
   const withWarm = makeStimulus(SR, {warmup: true}, lcg(12));
   const without = makeStimulus(SR, {warmup: false}, lcg(12));

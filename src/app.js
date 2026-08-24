@@ -238,11 +238,16 @@ async function run(which) {
     // the reference and every device run. If Windows silently flipped the
     // default mic (classic when a Bluetooth headset connects), the numbers
     // stop meaning anything — so check rather than assume.
-    if (state.refInputId && trackSettings.deviceId && trackSettings.deviceId !== state.refInputId) {
-      log('bad', 'Input device changed since the reference run — the differential is invalid', {
+    if (which === 'dut' && state.refInputId && trackSettings.deviceId &&
+        trackSettings.deviceId !== state.refInputId) {
+      log('bad', 'Input device changed since the reference run — refusing to measure', {
         referenceInput: state.refInputId, nowInput: trackSettings.deviceId,
       });
       toast('Microphone changed since the reference — re-measure the reference');
+      setStatus(statusId,
+        'The microphone changed since the reference was taken, so the two runs are no longer comparable. ' +
+        'Measure the reference again.', 'bad');
+      return;
     }
 
     if (usingSel) {
@@ -270,11 +275,17 @@ async function run(which) {
       (stage, detail) => log(stage === 'align' ? 'warn' : 'info', `Measurement ${stage}`, detail));
     const tookMs = Math.round(performance.now() - t0);
 
+    // Every sample after a dropped quantum is shifted, so the delay derived
+    // from it is wrong by an unknown amount. That is worse than no answer.
     if (r.droppedFrames) {
-      log('bad', 'Audio thread dropped frames during capture — alignment may be off', {
-        droppedFrames: r.droppedFrames,
-        droppedMs: +(r.droppedFrames / state.ctx.sampleRate * 1000).toFixed(1),
+      const droppedMs = +(r.droppedFrames / state.ctx.sampleRate * 1000).toFixed(1);
+      log('bad', 'Audio thread dropped frames during capture — discarding this run', {
+        droppedFrames: r.droppedFrames, droppedMs, tookMs,
       });
+      setStatus(statusId,
+        `Rejected: the audio thread dropped ${droppedMs} ms of capture, which shifts everything after it. ` +
+        `Close heavy background apps and measure again.`, 'bad');
+      return;
     }
 
     if (r.delayMs == null) {
