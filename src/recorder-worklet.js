@@ -19,8 +19,8 @@ class Recorder extends AudioWorkletProcessor {
   process(inputs) {
     const ch = inputs[0] && inputs[0][0];
     if (!ch) return true;
-    if (this.startFrame === null) this.startFrame = currentFrame;
     if (this.n + ch.length > this.buf.length) this.flush();
+    // stamped once per buffer: the frame of the sample about to land at buf[0]
     if (this.startFrame === null) this.startFrame = currentFrame;
     this.buf.set(ch, this.n);
     this.n += ch.length;
