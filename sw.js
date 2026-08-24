@@ -1,7 +1,7 @@
 // Minimal offline shell cache. No offline data, no background sync — the app
 // has nothing to sync, it only needs its own files available without a
 // network round trip on repeat visits.
-const CACHE = 'delay-detector-v3';
+const CACHE = 'delay-detector-v4';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest', './icon.svg',
   './src/app.js', './src/engine.js', './src/capture.js', './src/dropdown.js',
