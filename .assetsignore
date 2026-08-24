@@ -13,3 +13,4 @@ wrangler.jsonc
 .gitignore
 .wrangler
 eslint.config.mjs
+scripts

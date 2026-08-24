@@ -6,6 +6,9 @@
   "license": "MIT",
   "scripts": {
     "test": "node test/engine.test.js",
+    "lint": "eslint src test",
+    "stamp": "node scripts/stamp.mjs",
+    "deploy": "npm run test && npm run stamp && wrangler deploy",
     "start": "npx serve ."
   }
 }

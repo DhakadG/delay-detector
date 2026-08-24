@@ -7,6 +7,7 @@ import {
 import {enhanceSelect} from './dropdown.js';
 import {initLog, log, exportLog, clearLog, installGlobalHandlers} from './log.js';
 import {loadHistory, saveEntry, clearHistory, toCsv} from './store.js';
+import {BUILD, BUILT_AT} from './version.js';
 
 const $ = (id) => document.getElementById(id);
 const isVirtual = (label) => /voicemeeter|vb-audio|virtual cable/i.test(label || '');
@@ -499,7 +500,11 @@ function wireHandlers() {
 async function boot() {
   initLog($('log'));
   installGlobalHandlers();
+  const buildEl = $('build-stamp');
+  if (buildEl) { buildEl.textContent = BUILD; buildEl.title = `built ${BUILT_AT}`; }
   log('info', 'App loaded', {
+    build: BUILD,
+    builtAt: BUILT_AT,
     userAgent: navigator.userAgent,
     outputSwitchingSupported: state.switchable,
     engineDefaults: {

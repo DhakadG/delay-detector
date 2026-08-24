@@ -1,0 +1,11 @@
+# The app's correctness depends on running current code — a stale HTML or JS
+# file silently produces wrong measurements. Always revalidate these; the
+# service worker provides the offline story instead of the edge cache.
+/
+  Cache-Control: no-cache, must-revalidate
+/index.html
+  Cache-Control: no-cache, must-revalidate
+/sw.js
+  Cache-Control: no-cache, must-revalidate
+/src/*
+  Cache-Control: no-cache, must-revalidate
