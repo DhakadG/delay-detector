@@ -114,6 +114,7 @@ public static class Program
                 "listen" => Diagnostics.Listen(args),
                 "voicemeeter" or "vm" => Ui.ShowVoicemeeter(),
                 "logs" => RunLog.ShowFolder(args.Contains("--open")),
+                "param" => Param(args),
                 "serve" => BridgeServer.Run(int.TryParse(Arg(args, "--port"), out var p) ? p : 8765),
                 _ => Fail($"unknown command '{args[0]}' — try --help"),
             };
@@ -122,6 +123,41 @@ public static class Program
         {
             return Fail(ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Read or write any Voicemeeter parameter by name. Exists for diagnosis:
+    /// the structured endpoints only cover buses and strips, but engine-level
+    /// settings like Option.sr live outside that and still have to be
+    /// inspectable before anything is changed.
+    ///   delayprobe param Option.sr
+    ///   delayprobe param Option.sr 48000
+    ///   delayprobe param Bus[0].device.sr --string
+    /// </summary>
+    private static int Param(string[] args)
+    {
+        if (args.Length < 2) return Fail("usage: delayprobe param <name> [value] [--string]");
+        if (!VoicemeeterControl.Connect()) return Fail("Voicemeeter is not available");
+        string name = args[1];
+        bool asString = args.Contains("--string");
+        string? value = args.Length > 2 && !args[2].StartsWith("--") ? args[2] : null;
+
+        if (value is null)
+        {
+            if (asString) { Console.WriteLine($"{name} = \"{VoicemeeterControl.GetString(name)}\""); return 0; }
+            if (VoicemeeterControl.TryGetFloat(name, out var f)) { Console.WriteLine($"{name} = {f}"); return 0; }
+            // Not every parameter is a float; fall back rather than reporting nothing.
+            var sv = VoicemeeterControl.GetString(name);
+            if (!string.IsNullOrEmpty(sv)) { Console.WriteLine($"{name} = \"{sv}\""); return 0; }
+            return Fail($"could not read {name}");
+        }
+
+        bool ok = asString || !float.TryParse(value, out var nv)
+            ? VoicemeeterControl.SetString(name, value)
+            : VoicemeeterControl.SetFloat(name, nv);
+        if (!ok) return Fail($"could not set {name}");
+        Console.WriteLine($"{name} <- {value}");
+        return 0;
     }
 
     private static int Fail(string msg)

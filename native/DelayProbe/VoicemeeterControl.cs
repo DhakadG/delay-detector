@@ -176,6 +176,25 @@ public static class VoicemeeterControl
 
     public static void Logout()
     {
+        // A pending asynchronous write must reach the service before the client
+        // goes away. IsParametersDirty is the documented synchronisation point:
+        // poll it until it stops reporting changes, with a short ceiling so a
+        // wedged service cannot hang process exit.
+        if (_pendingWrite)
+        {
+            try
+            {
+                for (int i = 0; i < 20; i++)
+                {
+                    if (VBVMR_IsParametersDirty() == 0) break;
+                    Thread.Sleep(15);
+                }
+                Thread.Sleep(60);   // the dirty flag clears slightly before the engine applies it
+            }
+            catch { /* never let cleanup throw on the exit path */ }
+            _pendingWrite = false;
+        }
+
         lock (Gate)
         {
             if (!_loggedIn) return;
@@ -222,8 +241,19 @@ public static class VoicemeeterControl
         try { return VBVMR_GetParameterFloat(name, out value) == 0; } catch { return false; }
     }
 
+    /// <summary>
+    /// Set true by any write. The Remote API is explicitly asynchronous, so a
+    /// process that sets a parameter and immediately logs out can have the write
+    /// silently dropped — which is exactly what happened when three separate
+    /// `param` invocations each set one routing flag and exited: every write was
+    /// lost, and a whole alignment run unknowingly measured the same output three
+    /// times. Logout() now flushes when this is set.
+    /// </summary>
+    private static volatile bool _pendingWrite;
+
     public static bool SetFloat(string name, float value)
     {
+        _pendingWrite = true;
         if (!Connect()) return false;
         try { return VBVMR_SetParameterFloat(name, value) == 0; } catch { return false; }
     }
@@ -270,6 +300,7 @@ public static class VoicemeeterControl
 
     public static bool SetString(string name, string value)
     {
+        _pendingWrite = true;
         if (!Connect()) return false;
         try { return VBVMR_SetParameterStringA(name, value) == 0; } catch { return false; }
     }
