@@ -199,6 +199,17 @@
   .pick.virtual span { color: var(--mut); font-style: italic; }
   .subhead { font-size: .72rem; color: var(--mut-2); text-transform: uppercase; letter-spacing: .04em; margin: .9rem 0 .1rem; }
 
+  .vm-select { font: inherit; font-size: .82rem; padding: .35rem .5rem; border-radius: 8px; max-width: 20rem;
+               border: 1px solid var(--card-line); background: rgba(255,255,255,.03); color: inherit; }
+  .vm-routes { display: flex; gap: .3rem; flex-wrap: wrap; }
+  .vm-route { font: inherit; font-size: .75rem; font-weight: 600; min-width: 2.4rem; padding: .3rem .5rem;
+              border-radius: 7px; cursor: pointer; background: transparent; color: var(--mut-2);
+              border: 1px solid var(--card-line); }
+  .vm-route:hover { color: var(--fg); }
+  .vm-route.on { background: color-mix(in srgb, var(--accent) 20%, transparent);
+                 border-color: color-mix(in srgb, var(--accent) 55%, transparent); color: var(--accent); }
+  td.warn { color: var(--warn); }
+
   .progress { height: 6px; border-radius: 999px; background: rgba(255,255,255,.07); overflow: hidden; margin: .8rem 0 .4rem; }
   .progress > div { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s; }
 
@@ -352,11 +363,24 @@
       <button class="ghost-btn" id="btn-bridge-connect">Connect</button>
       <button class="ghost-btn small" id="btn-vm-refresh" hidden>Refresh Voicemeeter</button>
     </div>
-    <div class="table-wrap" id="vm-wrap" hidden>
-      <table>
-        <thead><tr><th>Bus</th><th>Label</th><th>Device</th><th>Delay</th><th></th></tr></thead>
-        <tbody id="vm-buses"></tbody>
-      </table>
+    <p class="note" id="vm-empty" hidden></p>
+    <div id="vm-wrap" hidden>
+      <p class="subhead">Outputs (buses)</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Bus</th><th>Label</th><th>Device</th><th>Delay</th><th></th></tr></thead>
+          <tbody id="vm-buses"></tbody>
+        </table>
+      </div>
+      <p class="subhead">Sources (strips) — tap a bus to route</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Strip</th><th>Sends to</th></tr></thead>
+          <tbody id="vm-strips"></tbody>
+        </table>
+      </div>
+      <p class="hint">Turning on two buses for the same strip plays to both devices at once —
+      which is when their delay difference becomes audible, and the case worth measuring.</p>
     </div>
   </section>
 

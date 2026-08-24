@@ -29,6 +29,7 @@ const state = {
   warnedVirtual: false,
   outputs: [],
   bridge: createBridge({baseUrl: DEFAULT_BRIDGE_URL}),
+  bridgeDevices: null, vmState: null,
   batchAbort: false, batchRunning: false,
 };
 
@@ -215,7 +216,7 @@ async function refreshDeviceLists() {
  * decide for themselves whether a capture was trustworthy, so the single-run
  * path and the batch runner cannot drift apart on that judgement.
  */
-async function performMeasurement({deviceId, label, tag}) {
+async function performMeasurement({deviceId, label, tag, attempt = 1}) {
   if (state.canPickOutput && deviceId) {
     log('info', 'Switching output sink', {to: label, deviceId});
     const t = performance.now();
@@ -229,9 +230,23 @@ async function performMeasurement({deviceId, label, tag}) {
     });
   }
 
+  // A context that was suspended (backgrounded tab, or never started) does not
+  // become steady the instant resume() returns: the render thread is still
+  // spinning up, and capturing through that produced the "first run always
+  // rejected, second run fine" pattern — 2944 dropped frames with firstFrame
+  // at 512, i.e. the graph had barely started. Wait for it to actually be
+  // running, then give it time to settle before trusting a capture.
   if (state.ctx.state !== 'running') {
-    log('warn', 'AudioContext not running at measurement start — resuming', {state: state.ctx.state});
+    log('warn', 'AudioContext not running — resuming and letting it settle', {state: state.ctx.state});
     await state.ctx.resume();
+    for (let i = 0; i < 20 && state.ctx.state !== 'running'; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (state.ctx.state !== 'running') {
+      return {error: `the audio context is "${state.ctx.state}" and would not start`};
+    }
+    await new Promise((r) => setTimeout(r, 600));
+    log('ok', 'AudioContext running', {outputLatencyMs: +((state.ctx.outputLatency ?? 0) * 1000).toFixed(2)});
   }
 
   state.meter?.mark(tag);
@@ -244,10 +259,19 @@ async function performMeasurement({deviceId, label, tag}) {
   // the derived delay is wrong rather than merely noisy.
   if (r.droppedFrames) {
     const droppedMs = +(r.droppedFrames / state.ctx.sampleRate * 1000).toFixed(1);
-    log('bad', 'Audio thread dropped frames during capture — discarding this run', {
-      device: label, droppedFrames: r.droppedFrames, droppedMs, tookMs,
-    });
-    return {error: `the audio thread dropped ${droppedMs} ms of capture`};
+    // A dropped quantum shifts every later sample, so the delay would be wrong
+    // rather than merely noisy — the run has to go. But the usual cause is a
+    // transient (the graph just started, or the tab was briefly busy), and it
+    // almost never repeats, so retry once before bothering the user.
+    log(attempt === 1 ? 'warn' : 'bad',
+      `Audio thread dropped frames during capture — ${attempt === 1 ? 'retrying once' : 'discarding this run'}`, {
+        device: label, droppedFrames: r.droppedFrames, droppedMs, tookMs, attempt,
+      });
+    if (attempt === 1) {
+      await new Promise((res) => setTimeout(res, 400));
+      return performMeasurement({deviceId, label, tag, attempt: 2});
+    }
+    return {error: `the audio thread dropped ${droppedMs} ms of capture, twice in a row`};
   }
 
   if (r.delayMs == null) {
@@ -398,32 +422,94 @@ function setBridgeStatus(text, cls = '') {
 }
 
 /**
- * Voicemeeter's per-bus output delay is the knob that makes a wired output line up
- * with a Bluetooth one: measure the difference, then delay the faster bus by it.
- * Writing it from here saves reading a number off one screen and typing it into another.
+ * Voicemeeter routing and delay, driven from here so the whole workflow lives in one
+ * place: switch which physical outputs a source feeds (A1/A2/A3...), measure the
+ * difference between them, then write that difference into the faster bus's output
+ * delay so they line up. Previously this meant alt-tabbing to Voicemeeter between
+ * every step.
+ *
+ * Voicemeeter's model: a *strip* is a source, a *bus* (A1..An) is a physical output.
+ * A strip feeds any combination of buses, so ticking two A-flags is exactly how you
+ * play to two devices at once — which is the case worth measuring, since that is when
+ * their delay difference becomes audible.
  */
 function renderVoicemeeter(st) {
-  const wrap = $('vm-wrap'), body = $('vm-buses');
-  body.innerHTML = '';
-  if (!st?.running || !st.buses?.length) { wrap.hidden = true; return; }
+  const wrap = $('vm-wrap');
+  state.vmState = st;
+  if (!st?.running) {
+    wrap.hidden = true;
+    $('vm-empty').hidden = false;
+    $('vm-empty').textContent = st?.available
+      ? 'Voicemeeter is installed but not running.'
+      : 'Voicemeeter was not found on this machine.';
+    return;
+  }
+  $('vm-empty').hidden = true;
   wrap.hidden = false;
 
-  for (const bus of st.buses) {
+  const busCount = st.buses?.length || 0;
+  const renderNames = (state.bridgeDevices?.render || []).map((d) => d.name);
+
+  // --- buses: device assignment + output delay ---
+  const busBody = $('vm-buses');
+  busBody.innerHTML = '';
+  for (const bus of st.buses || []) {
     const tr = document.createElement('tr');
-    tr.innerHTML =
-      `<td class="mono">A${bus.index + 1}</td>` +
-      `<td>${escapeHtml(bus.label || '')}</td>` +
-      `<td>${escapeHtml(bus.device || '—')}</td>` +
-      `<td class="mono">${Number(bus.delayMs ?? 0).toFixed(0)} ms</td>`;
-    const td = document.createElement('td');
+
+    const name = document.createElement('td');
+    name.className = 'mono';
+    name.textContent = `A${bus.index + 1}`;
+    tr.appendChild(name);
+
+    const lbl = document.createElement('td');
+    lbl.textContent = bus.label || '—';
+    tr.appendChild(lbl);
+
+    // device picker, populated from the machine's real render devices
+    const devTd = document.createElement('td');
+    const sel = document.createElement('select');
+    sel.className = 'vm-select';
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = bus.device ? bus.device : '— not assigned —';
+    sel.appendChild(none);
+    for (const n of renderNames) {
+      const opt = document.createElement('option');
+      opt.value = n;
+      opt.textContent = n;
+      if (n === bus.device) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.onchange = async () => {
+      if (!sel.value) return;
+      try {
+        await state.bridge.setBusDevice(bus.index, sel.value, 'wdm');
+        log('ok', 'Voicemeeter bus device assigned', {bus: bus.index, device: sel.value});
+        toast(`A${bus.index + 1} → ${sel.value}`);
+        await refreshVoicemeeter();
+      } catch (e) {
+        log('bad', 'Could not assign Voicemeeter bus device', {code: e.code, error: e.message});
+        toast(describeBridgeError(e));
+      }
+    };
+    devTd.appendChild(sel);
+    tr.appendChild(devTd);
+
+    const delay = document.createElement('td');
+    delay.className = 'mono';
+    delay.textContent = `${Number(bus.delayMs ?? 0).toFixed(0)} ms`;
+    if ((bus.delayMs ?? 0) > 0) delay.classList.add('warn');
+    tr.appendChild(delay);
+
+    const act = document.createElement('td');
     const btn = document.createElement('button');
     btn.className = 'ghost-btn small';
     btn.textContent = 'Set delay';
     btn.onclick = async () => {
       const ms = await promptNumber({
         title: `Output delay for A${bus.index + 1}`,
-        body: `Delays everything leaving this bus. To line a fast wired output up with a slow ` +
-              `Bluetooth one, delay the fast bus by the difference you measured.`,
+        body: 'Delays everything leaving this bus. To line a fast output up with a slower one, ' +
+              'delay the fast bus by the difference you measured.',
         value: String(Math.round(bus.delayMs ?? 0)),
         min: 0, max: 500, unit: 'ms', confirmText: 'Apply',
       });
@@ -431,16 +517,65 @@ function renderVoicemeeter(st) {
       try {
         await state.bridge.setDelay(bus.index, ms);
         log('ok', 'Voicemeeter bus delay set', {bus: bus.index, ms});
-        toast(`A${bus.index + 1} delay set to ${ms} ms`);
-        renderVoicemeeter(await state.bridge.voicemeeterState());
+        toast(`A${bus.index + 1} delay ${ms} ms`);
+        await refreshVoicemeeter();
       } catch (e) {
         log('bad', 'Could not set Voicemeeter delay', {code: e.code, error: e.message});
         toast(describeBridgeError(e));
       }
     };
-    td.appendChild(btn);
-    tr.appendChild(td);
-    body.appendChild(tr);
+    act.appendChild(btn);
+    tr.appendChild(act);
+    busBody.appendChild(tr);
+  }
+
+  // --- strips: which buses each source feeds ---
+  const stripBody = $('vm-strips');
+  stripBody.innerHTML = '';
+  for (const strip of st.strips || []) {
+    const tr = document.createElement('tr');
+    const nm = document.createElement('td');
+    nm.textContent = strip.label || `Strip ${strip.index + 1}`;
+    tr.appendChild(nm);
+
+    const routeTd = document.createElement('td');
+    routeTd.className = 'vm-routes';
+    for (let i = 0; i < busCount; i++) {
+      const on = !!strip.a?.[i];
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'vm-route' + (on ? ' on' : '');
+      b.textContent = `A${i + 1}`;
+      b.title = `${on ? 'Stop sending' : 'Send'} strip ${strip.index + 1} to A${i + 1}`;
+      b.onclick = async () => {
+        // Send the whole A vector, since the endpoint sets them together.
+        const flags = Array.from({length: busCount}, (_, k) => !!strip.a?.[k]);
+        flags[i] = !on;
+        try {
+          await state.bridge.setRoute(strip.index, flags);
+          log('ok', 'Voicemeeter routing changed', {strip: strip.index, a: flags});
+          await refreshVoicemeeter();
+        } catch (e) {
+          log('bad', 'Could not change Voicemeeter routing', {code: e.code, error: e.message});
+          toast(describeBridgeError(e));
+        }
+      };
+      routeTd.appendChild(b);
+    }
+    tr.appendChild(routeTd);
+    stripBody.appendChild(tr);
+  }
+}
+
+/** Always re-reads from the app; the previous version could leave a stale table on screen. */
+async function refreshVoicemeeter() {
+  if (!state.bridge.isConnected()) return;
+  try {
+    if (!state.bridgeDevices) state.bridgeDevices = await state.bridge.devices();
+    renderVoicemeeter(await state.bridge.voicemeeterState());
+  } catch (e) {
+    log('warn', 'Could not read Voicemeeter state', {code: e.code, error: e.message});
+    setBridgeStatus(describeBridgeError(e), 'warn');
   }
 }
 
@@ -455,7 +590,12 @@ async function connectBridge() {
     setBridgeStatus(`connected · v${info.version} · ${vmText}`, 'ok');
     log('ok', 'Local app connected', {version: info.version, voicemeeter: vm});
     $('btn-vm-refresh').hidden = false;
-    if (vm.running) renderVoicemeeter(await state.bridge.voicemeeterState());
+    state.bridgeDevices = await state.bridge.devices();
+    log('info', 'Local app device list', {
+      render: state.bridgeDevices.render.map((d) => d.name),
+      capture: state.bridgeDevices.capture.map((d) => d.name),
+    });
+    await refreshVoicemeeter();
   } catch (e) {
     setBridgeStatus(describeBridgeError(e), 'warn');
     log('warn', 'Local app not connected', {code: e.code, error: e.message});
@@ -736,8 +876,10 @@ function wireHandlers() {
 
   $('btn-bridge-connect').onclick = connectBridge;
   $('btn-vm-refresh').onclick = async () => {
-    try { renderVoicemeeter(await state.bridge.voicemeeterState()); toast('Voicemeeter refreshed'); }
-    catch (e) { toast(describeBridgeError(e)); }
+    // Re-read the device list too: buses can be reassigned in Voicemeeter itself.
+    state.bridgeDevices = null;
+    await refreshVoicemeeter();
+    toast('Voicemeeter refreshed');
   };
 
   $('btn-ref').onclick = () => run('ref');
